@@ -93,10 +93,19 @@ type OpenAIStreamChunk struct {
 	Created int64          `json:"created"`
 	Model   string         `json:"model"`
 	Choices []OpenAIChoice `json:"choices"`
+	Usage   *OpenAIUsage   `json:"usage,omitempty"`
 }
 
 
+// MakeOpenAIStreamChunk 创建流式内容块（finish=true 时为收尾块）
 func MakeOpenAIStreamChunk(model, content string, finish bool) []byte {
+	return MakeOpenAIStreamChunkWithUsage(model, content, finish, nil)
+}
+
+// MakeOpenAIStreamChunkWithUsage 创建流式内容块，可在收尾块携带 usage
+// （OpenAI 规范：stream_options.include_usage 时最后一个 chunk 带 usage 且 choices 为空数组；
+// 实践中客户端普遍兼容"收尾块带 usage"的写法）
+func MakeOpenAIStreamChunkWithUsage(model, content string, finish bool, usage *OpenAIUsage) []byte {
 	now := time.Now().Unix()
 	chunk := OpenAIStreamChunk{
 		ID:      fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:8]),
@@ -117,6 +126,7 @@ func MakeOpenAIStreamChunk(model, content string, finish bool) []byte {
 	} else {
 		chunk.Choices[0].Delta.Content = content
 	}
+	chunk.Usage = usage
 
 	data, _ := json.Marshal(chunk)
 	return data
@@ -124,6 +134,11 @@ func MakeOpenAIStreamChunk(model, content string, finish bool) []byte {
 
 // MakeOpenAIResponse 创建 OpenAI 非流式响应
 func MakeOpenAIResponse(model, content string) []byte {
+	return MakeOpenAIResponseWithUsage(model, content, nil)
+}
+
+// MakeOpenAIResponseWithUsage 创建带 usage 的非流式响应
+func MakeOpenAIResponseWithUsage(model, content string, usage *OpenAIUsage) []byte {
 	now := time.Now().Unix()
 	fr := "stop"
 	resp := OpenAIChatResponse{
@@ -141,6 +156,7 @@ func MakeOpenAIResponse(model, content string) []byte {
 				FinishReason: &fr,
 			},
 		},
+		Usage: usage,
 	}
 	data, _ := json.Marshal(resp)
 	return data

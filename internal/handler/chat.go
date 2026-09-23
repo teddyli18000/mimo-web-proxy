@@ -134,9 +134,11 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		mimo.ParseWebSSE(ctx, body, events)
 	}()
 
-	// 分发事件：提取 usage 和 dialogId，转发 message
-	usageChan := make(chan *usageData, 1)
-	dialogChan := make(chan string, 1)
+	// 分发事件：usage/dialogId 存入局部变量（fastchat 通道一次对话会发多个 usage
+	// 事件——channel buffer 会被塞爆导致分发 goroutine 死锁，2026-09 实测），
+	// 循环结束后统一交给消费者；message 实时转发。
+	lastUsage := new(*usageData)
+	lastDialog := new(string)
 	lastMsgIDChan := make(chan string, 1)
 	hasContentChan := make(chan bool, 1)
 	msgChan := make(chan mimo.WebSSEEvent, 64)
@@ -163,33 +165,34 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 			case "usage":
 				var u usageData
 				if json.Unmarshal([]byte(ev.Data), &u) == nil {
-					usageChan <- &u
+					*lastUsage = &u // 覆盖：以最后一个 usage 为准（总额）
 				}
 			case "dialogId":
 				var d dialogIdData
 				if json.Unmarshal([]byte(ev.Data), &d) == nil {
-					dialogChan <- d.Content
+					*lastDialog = d.Content
 				}
 			case "message":
 				msgChan <- ev
 			}
 		}
-		close(usageChan)
-		close(dialogChan)
 		lastMsgIDChan <- lastMsgID
 		close(lastMsgIDChan)
 		hasContentChan <- hasContent
 		close(hasContentChan)
 	}()
 
+	// 流式/非流式输出；usage 从上游 usage 事件透传给客户端
+	// （OpenAI 规范：stream 收尾块带 usage；非流式顶层 usage 字段）
+	var gotUsage *usageData
 	if stream {
-		h.streamWebToOpenAI(w, model, msgChan, len(req.Tools) > 0)
+		h.streamWebToOpenAI(w, model, msgChan, len(req.Tools) > 0, &gotUsage)
 	} else {
-		h.nonStreamWebToOpenAI(w, model, msgChan)
+		h.nonStreamWebToOpenAI(w, model, msgChan, &gotUsage)
 	}
 
 	// 后处理：记录 usage，保存对话映射
-	if u := <-usageChan; u != nil {
+	if u := gotUsage; u != nil {
 		cached := 0
 		reasoning := 0
 		if u.NativeUsage != nil {
@@ -206,9 +209,10 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	// 保存对话到 MiMo 官网 + 更新 parentId（仅在有实际内容时）
+	// ultra 对话的 save 也走 fastchat 通道
 	hasContent := <-hasContentChan
 	if convID != "" && hasContent {
-		go client.SaveConversation(context.Background(), convID, query)
+		go client.SaveConversation(context.Background(), convID, query, model == router.ModelV26UltraSpeed)
 	}
 	if lastMsgID := <-lastMsgIDChan; lastMsgID != "" && hasContent {
 		h.convStore.SetParentID(key, lastMsgID)
@@ -218,7 +222,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	}
 }
 
-func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, hasTools bool) {
+func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, hasTools bool, gotUsage **usageData) {
 	flusher := w.(http.Flusher)
 	inThinking := false
 
@@ -230,28 +234,49 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		flusher.Flush()
 	}
 
+	upstreamErr := ""
 	for event := range events {
-		if event.Event != "message" {
-			continue
+		switch event.Event {
+		case "message":
+			var msg struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
+				continue
+			}
+			if msg.Type != "text" || msg.Content == "" {
+				continue
+			}
+			c := strings.ReplaceAll(msg.Content, "\u0000", "")
+			c, inThinking = filterThinkingChunk(c, inThinking)
+			if c == "" {
+				continue
+			}
+			buffered.WriteString(c)
+			// Stream text chunks immediately
+			writeChunk(c, false)
+		case "usage":
+			var u usageData
+			if json.Unmarshal([]byte(event.Data), &u) == nil {
+				*gotUsage = &u
+			}
+		case "error":
+			// 上游业务错误（如模型名称错误）——透传给客户端，不再静默
+			var e struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			json.Unmarshal([]byte(event.Data), &e)
+			if e.Content != "" {
+				upstreamErr = e.Content
+			}
 		}
-		var msg struct {
-			Type    string `json:"type"`
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
-			continue
-		}
-		if msg.Type != "text" || msg.Content == "" {
-			continue
-		}
-		c := strings.ReplaceAll(msg.Content, "\u0000", "")
-		c, inThinking = filterThinkingChunk(c, inThinking)
-		if c == "" {
-			continue
-		}
-		buffered.WriteString(c)
-		// Stream text chunks immediately
-		writeChunk(c, false)
+	}
+
+	if upstreamErr != "" && buffered.Len() == 0 {
+		writeError(w, http.StatusBadGateway, "mimo: "+upstreamErr)
+		return
 	}
 
 	finalText := strings.TrimSpace(buffered.String())
@@ -273,7 +298,21 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		}
 	}
 
-	writeChunk("", true)
+	// 收尾块携带 usage（客户端的"本轮用量"即来源于此）
+	var finalUsage *adapter.OpenAIUsage
+	if u := *gotUsage; u != nil {
+		finalUsage = &adapter.OpenAIUsage{
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.TotalTokens,
+		}
+	}
+	writeChunkWithUsage := func(finish bool) {
+		chunk := adapter.MakeOpenAIStreamChunkWithUsage(model, "", finish, finalUsage)
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		flusher.Flush()
+	}
+	writeChunkWithUsage(true)
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
@@ -307,30 +346,50 @@ func filterThinkingChunk(content string, inThinking bool) (string, bool) {
 	return result.String(), inThinking
 }
 
-func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent) {
+func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, gotUsage **usageData) {
 	var content strings.Builder
 	inThinking := false
+	upstreamErr := ""
 
 	for event := range events {
-		if event.Event != "message" {
-			continue
-		}
-		var msg struct {
-			Type    string `json:"type"`
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
-			continue
-		}
-		if msg.Type == "text" && msg.Content != "" {
-			c := strings.ReplaceAll(msg.Content, "\u0000", "")
-			c, inThinking = filterThinkingChunk(c, inThinking)
-			content.WriteString(c)
+		switch event.Event {
+		case "message":
+			var msg struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
+				continue
+			}
+			if msg.Type == "text" && msg.Content != "" {
+				c := strings.ReplaceAll(msg.Content, "\u0000", "")
+				c, inThinking = filterThinkingChunk(c, inThinking)
+				content.WriteString(c)
+			}
+		case "usage":
+			var u usageData
+			if json.Unmarshal([]byte(event.Data), &u) == nil {
+				*gotUsage = &u
+			}
+		case "error":
+			var e struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			json.Unmarshal([]byte(event.Data), &e)
+			if e.Content != "" {
+				upstreamErr = e.Content
+			}
 		}
 	}
 
-
 	finalText := strings.TrimSpace(content.String())
+
+	// 上游业务错误且没有任何正文 → 502 透传
+	if upstreamErr != "" && finalText == "" {
+		writeError(w, http.StatusBadGateway, "mimo: "+upstreamErr)
+		return
+	}
 
 	// 检测是否包含工具调用
 	log.Printf("[tools] non-stream raw output (len=%d): %q", len(finalText), finalText[:min(len(finalText), 500)])
@@ -351,7 +410,16 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 		}
 	}
 
-	resp := adapter.MakeOpenAIResponse(model, finalText)
+	// 非流式响应带 usage
+	var finalUsage *adapter.OpenAIUsage
+	if u := *gotUsage; u != nil {
+		finalUsage = &adapter.OpenAIUsage{
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.TotalTokens,
+		}
+	}
+	resp := adapter.MakeOpenAIResponseWithUsage(model, finalText, finalUsage)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
@@ -462,8 +530,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		mimo.ParseWebSSE(ctx, body, events)
 	}()
 
-	// 分发事件
-	usageChan := make(chan *usageData, 1)
+	// 分发事件（同 OpenAI 路径：usage 存局部变量，防 fastchat 多 usage 事件死锁）
+	lastUsageA := new(*usageData)
 	msgChan := make(chan mimo.WebSSEEvent, 64)
 	lastMsgIDChan := make(chan string, 1)
 	hasContentChan := make(chan bool, 1)
@@ -490,13 +558,12 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			case "usage":
 				var u usageData
 				if json.Unmarshal([]byte(ev.Data), &u) == nil {
-					usageChan <- &u
+					*lastUsageA = &u
 				}
 			case "message":
 				msgChan <- ev
 			}
 		}
-		close(usageChan)
 		lastMsgIDChan <- lastMsgID
 		close(lastMsgIDChan)
 		hasContentChan <- hasContent
@@ -653,7 +720,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 记录 usage
-	if u := <-usageChan; u != nil {
+	if u := *lastUsageA; u != nil {
 		cached := 0
 		reasoning := 0
 		if u.NativeUsage != nil {
@@ -677,7 +744,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	// 保存对话到 MiMo 官网历史记录
 	if hasContent {
-		go client.SaveConversation(context.Background(), convID, query)
+		go client.SaveConversation(context.Background(), convID, query, routeResult.Model == router.ModelV26UltraSpeed)
 	}
 }
 

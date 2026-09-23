@@ -19,6 +19,11 @@ import (
 const (
 	webBaseURL = "https://aistudio.xiaomimimo.com"
 	chatAPI    = "/open-apis/bot/chat"
+	// ultraspeed 型号走独立的 fastchat 通道（2026-09 用户真实抓包证实；
+	// 在 open-apis 通道发送该型号会返回"模型名称错误"）
+	ultraChatAPI    = "/fastchat/open-apis/bot/chat"
+	ultraSaveAPI    = "/fastchat/open-apis/chat/conversation/save"
+	modelUltraSpeed = "mimo-v2.6-pro-ultraspeed-studio"
 
 	// 浏览器指纹：2026-09 Chrome 稳定版。上游按 UA/sec-ch-ua 做一致性风控，
 	// 过期版本会被拒。改这里时 UA 与 sec-ch-ua 的版本号必须同步。
@@ -120,7 +125,13 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	reqURL := fmt.Sprintf("%s%s?xiaomichatbot_ph=%s", webBaseURL, chatAPI, url.QueryEscape(c.ph))
+	// 根据模型选择通道：ultraspeed 走 fastchat，其余走 open-apis
+	// （save 路径在 SaveConversation 里按同规则选择）
+	chatPath := chatAPI
+	if model == modelUltraSpeed {
+		chatPath = ultraChatAPI
+	}
+	reqURL := fmt.Sprintf("%s%s?xiaomichatbot_ph=%s", webBaseURL, chatPath, url.QueryEscape(c.ph))
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -185,9 +196,14 @@ func ParseWebSSE(ctx context.Context, reader io.ReadCloser, events chan<- WebSSE
 }
 
 // SaveConversation 保存对话到 MiMo 官网（维持服务端上下文的关键）
-func (c *WebClient) SaveConversation(ctx context.Context, conversationID, query string) {
+// ultra=true 时保存到 fastchat 通道（与该对话的 chat 通道保持一致）
+func (c *WebClient) SaveConversation(ctx context.Context, conversationID, query string, ultra bool) {
 	encodedPh := url.QueryEscape(c.ph)
-	saveURL := fmt.Sprintf("%s/open-apis/chat/conversation/save?xiaomichatbot_ph=%s", webBaseURL, encodedPh)
+	saveAPI := "/open-apis/chat/conversation/save"
+	if ultra {
+		saveAPI = ultraSaveAPI
+	}
+	saveURL := fmt.Sprintf("%s%s?xiaomichatbot_ph=%s", webBaseURL, saveAPI, encodedPh)
 
 	title := query
 	if len(title) > 30 {

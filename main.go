@@ -84,6 +84,11 @@ func main() {
 		})
 	})
 
+	// 无 /v1 前缀的别名：兼容把 Base URL 配成 http://localhost:8080
+	// 而 client 自己拼 /chat/completions 的情况（如 DSH openai-completions 协议）
+	r.With(apiKeyAuth).Post("/chat/completions", chatHandler.Handle)
+	r.With(apiKeyAuth).Post("/completions", chatHandler.Handle)
+
 	// Anthropic 快捷路径
 	r.With(apiKeyAuth).Post("/anthropic/v1/messages", messagesHandler.Handle)
 
