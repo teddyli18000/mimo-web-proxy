@@ -54,11 +54,11 @@ docker compose up -d
 4. 找到 `chat` 开头的请求（通常是 `chat?xiaomichatbot_ph=...`）
 5. 点开它，在 **Request Headers** 里找到 `cookie:` 字段，提取三个值：
 
-| 配置字段 | Cookie 中的 key | 格式示例 |
+| 配置字段 | Cookie 中的 key | 格式示例|
 |---|---|---|
-| `service_token` | `serviceToken` | `/Qzv9hyEQZi...`（长 base64） |
-| `user_id` | `userId` | `3215624450`（纯数字） |
-| `ph` | `xiaomichatbot_ph` | `0Fjou2NP2l54M8SRzvNO/g==` |
+| `service_token` | `serviceToken` | `/Qzv9hyEQZi......`（长 base64） |
+| `user_id` | `userId` | `3215624450......`（纯数字） |
+| `ph` | `xiaomichatbot_ph` | `0Fjou2NP2l54M8SRzvNO/g==......` |
 
 6. 填入管理面板「配置 → 账号池 → 添加」，或直接编辑 `config.json`：
 
