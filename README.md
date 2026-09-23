@@ -56,7 +56,7 @@ docker compose up -d
 
 | 配置字段 | Cookie 中的 key | 格式示例|
 |---|---|---|
-| `service_token` | `serviceToken` | `/Qzv9hyEQZi......`（长 base64） |
+| `service_token` | `serviceToken`（或 `xiaomichatbot_serviceToken`） | `/Qzv9hyEQZi......`（长 base64，约 390 字符） |
 | `user_id` | `userId` | `3215624450......`（纯数字） |
 | `ph` | `xiaomichatbot_ph` | `0Fjou2NP2l54M8SRzvNO/g==......` |
 
