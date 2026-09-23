@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128,128,128,0.2) transparent;
+  }
+  *::-webkit-scrollbar { width: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.2); border-radius: 3px; }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.3); }
+}
+
+/* ============ DARK THEME ============ */
+.dark {
+  color-scheme: dark;
+}
+
+.dark body {
+  background: #0a0a0f;
+  color: #e5e7eb;
+}
+
+.dark .glass {
+  @apply bg-white/[0.03] backdrop-blur-xl border border-white/[0.06] rounded-2xl;
+}
+.dark .glass-strong {
+  @apply bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-2xl;
+}
+.dark .glass-hover {
+  @apply transition-all duration-300 hover:bg-white/[0.06] hover:border-white/[0.1] hover:shadow-lg hover:shadow-purple-500/5;
+}
+
+.dark .bg-grid {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+.dark .bg-glow::before {
+  content: '';
+  position: fixed;
+  top: -50%; left: -50%;
+  width: 200%; height: 200%;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(168,85,247,0.08) 0%, transparent 50%),
+    radial-gradient(circle at 70% 70%, rgba(236,72,153,0.06) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ============ LIGHT THEME ============ */
+.light {
+  color-scheme: light;
+}
+
+.light body {
+  background: #f8f9fc;
+  color: #1f2937;
+}
+
+.light .glass {
+  @apply bg-white/70 backdrop-blur-xl border border-gray-200/60 rounded-2xl shadow-sm;
+}
+.light .glass-strong {
+  @apply bg-white/80 backdrop-blur-xl border border-gray-200/80 rounded-2xl shadow-sm;
+}
+.light .glass-hover {
+  @apply transition-all duration-300 hover:bg-white/90 hover:border-gray-300/60 hover:shadow-md hover:shadow-purple-500/5;
+}
+
+.light .bg-grid {
+  background-image:
+    linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+.light .bg-glow::before {
+  content: '';
+  position: fixed;
+  top: -50%; left: -50%;
+  width: 200%; height: 200%;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(168,85,247,0.05) 0%, transparent 50%),
+    radial-gradient(circle at 70% 70%, rgba(236,72,153,0.04) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.light .sidebar-nav-item {
+  color: #6b7280;
+}
+.light .sidebar-nav-item:hover {
+  color: #1f2937;
+  background: rgba(0,0,0,0.04);
+}
+.light .sidebar-nav-item.active {
+  color: #7c3aed;
+  background: rgba(124,58,237,0.08);
+  border-color: rgba(124,58,237,0.15);
+}
+
+.light .stat-card-value { color: #111827; }
+.light .stat-card-label { color: #6b7280; }
+
+.light .table-header { color: #6b7280; border-bottom-color: rgba(0,0,0,0.06); }
+.light .table-row { border-bottom-color: rgba(0,0,0,0.04); }
+.light .table-row:hover { background: rgba(0,0,0,0.02); }
+.light .table-cell { color: #374151; }
+
+.light .code-block {
+  background: rgba(0,0,0,0.04);
+  color: #1f2937;
+}
+
+.light .badge-purple { background: rgba(124,58,237,0.1); color: #7c3aed; }
+.light .badge-green { background: rgba(16,185,129,0.1); color: #059669; }
+.light .badge-blue { background: rgba(59,130,246,0.1); color: #2563eb; }
+
+.light .text-primary { color: #111827; }
+.light .text-secondary { color: #6b7280; }
+.light .text-muted { color: #9ca3af; }
+
+.light .border-subtle { border-color: rgba(0,0,0,0.06); }
+
+/* ============ SHARED ============ */
+
+@layer components {
+  .glow-purple {
+    box-shadow: 0 0 40px -10px rgba(168, 85, 247, 0.3);
+  }
+  .glow-text {
+    text-shadow: 0 0 20px rgba(168, 85, 247, 0.5);
+  }
+  .gradient-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-purple-400 via-pink-400 to-purple-400;
+    background-size: 200% auto;
+    animation: gradient 3s ease infinite;
+  }
+  .light .gradient-text {
+    @apply from-purple-600 via-pink-600 to-purple-600;
+  }
+}
+
+@keyframes gradient {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@keyframes animateIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}

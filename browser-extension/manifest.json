@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "MiMo Web Proxy Helper",
+  "version": "1.1.0",
+  "description": "一键将 MiMo 登录态同步到本机 MiMo Web Proxy 网关（只发往你自己配置的网关地址）",
+  "permissions": [
+    "cookies"
+  ],
+  "host_permissions": [
+    "https://*.xiaomimimo.com/*",
+    "https://*.xiaomi.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

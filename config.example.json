@@ -1,0 +1,6 @@
+{
+  "port": "8080",
+  "api_key": "sk-mimo",
+  "default_model": "mimo-v2.6-pro",
+  "accounts": []
+}

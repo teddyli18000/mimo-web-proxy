@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  width: 320px;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  padding: 16px;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.logo-icon {
+  width: 32px; height: 32px;
+  background: linear-gradient(135deg, #a855f7, #ec4899);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.logo-text { font-size: 16px; font-weight: 600; }
+.field { margin-bottom: 12px; }
+.field label {
+  display: block;
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 4px;
+}
+.field input {
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #fff;
+  font-size: 13px;
+  font-family: monospace;
+  outline: none;
+}
+.field input:focus { border-color: #a855f7; }
+.btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 4px;
+}
+.btn-primary {
+  background: linear-gradient(135deg, #a855f7, #ec4899);
+  color: #fff;
+}
+.btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.status {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  display: none;
+}
+.status.ok { display: block; background: rgba(34,197,94,0.15); color: #22c55e; }
+.status.err { display: block; background: rgba(239,68,68,0.15); color: #ef4444; }
+.status.loading { display: block; background: rgba(168,85,247,0.15); color: #a855f7; }
+.cookies-preview {
+  margin-top: 12px;
+  padding: 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: monospace;
+  color: #666;
+  max-height: 80px;
+  overflow-y: auto;
+  display: none;
+}
+.cookies-preview.show { display: block; }
+.cookie-ok { color: #22c55e; }
+.cookie-miss { color: #ef4444; }
+</style>
+</head>
+<body>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div class="logo-text">MiMo Free API Helper</div>
+  </div>
+
+  <div class="field">
+    <label>Gateway 地址</label>
+    <input id="gateway" type="text" value="http://localhost:8080" />
+  </div>
+
+  <div class="field">
+    <label>Gateway API Key</label>
+    <input id="apikey" type="password" value="sk-mimo" />
+  </div>
+
+  <button class="btn btn-primary" id="syncBtn">🔄 同步 Cookie 到 Gateway</button>
+
+  <div class="status" id="status"></div>
+  <div class="cookies-preview" id="preview"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
