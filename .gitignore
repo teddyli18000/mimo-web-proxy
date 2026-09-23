@@ -37,3 +37,6 @@ Thumbs.db
 # Env
 .env
 !.env.example
+
+# Test config with real credentials
+config.test.json

@@ -399,11 +399,8 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 		if len(calls) > 0 {
 			toolCalls := toolcall.ConvertToolCallsToOpenAI(calls)
 			log.Printf("[tools] detected %d tool calls in response", len(toolCalls))
-			resp := adapter.MakeOpenAIToolCallResponse(model, toolCalls)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write(resp)
-			return nil
+			// 返回响应体，由 handleWebChat 注入 usage 后统一写出
+			return adapter.MakeOpenAIToolCallResponse(model, toolCalls)
 		}
 	}
 
