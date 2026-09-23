@@ -136,9 +136,10 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 
 	// 分发事件：usage/dialogId 存入局部变量（fastchat 通道一次对话会发多个 usage
 	// 事件——channel buffer 会被塞爆导致分发 goroutine 死锁，2026-09 实测），
-	// 循环结束后统一交给消费者；message 实时转发。
+	// 循环结束后经 usageResultChan 交给消费者；message 实时转发。
 	lastUsage := new(*usageData)
 	lastDialog := new(string)
+	usageResultChan := make(chan *usageData, 1)
 	lastMsgIDChan := make(chan string, 1)
 	hasContentChan := make(chan bool, 1)
 	msgChan := make(chan mimo.WebSSEEvent, 64)
@@ -180,18 +181,21 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		close(lastMsgIDChan)
 		hasContentChan <- hasContent
 		close(hasContentChan)
+		usageResultChan <- *lastUsage
+		close(usageResultChan)
 	}()
 
-	// 流式/非流式输出；usage 从上游 usage 事件透传给客户端
-	// （OpenAI 规范：stream 收尾块带 usage；非流式顶层 usage 字段）
-	var gotUsage *usageData
+	// 流式/非流式输出（非流式返回响应体，usage 注入后再写出）
+	var nonStreamBody []byte
 	if stream {
-		h.streamWebToOpenAI(w, model, msgChan, len(req.Tools) > 0, &gotUsage)
+		h.streamWebToOpenAI(w, model, msgChan, len(req.Tools) > 0)
 	} else {
-		h.nonStreamWebToOpenAI(w, model, msgChan, &gotUsage)
+		nonStreamBody = h.nonStreamWebToOpenAI(w, model, msgChan)
 	}
 
-	// 后处理：记录 usage，保存对话映射
+	// 后处理：取最终 usage —— 记录统计；流式在 [DONE] 前补 usage 收尾块；
+	// 非流式的 usage 注入由 nonStreamWebToOpenAI 通过 usageResultChan 完成（见其实现）
+	gotUsage := <-usageResultChan
 	if u := gotUsage; u != nil {
 		cached := 0
 		reasoning := 0
@@ -206,6 +210,42 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		stats.Get().Record(model, u.PromptTokens, u.CompletionTokens, cached, reasoning, u.TotalTokens)
 		log.Printf("[usage] model=%s prompt=%d completion=%d cached=%d reasoning=%d",
 			model, u.PromptTokens, u.CompletionTokens, cached, reasoning)
+		if stream {
+			openaiUsage := &adapter.OpenAIUsage{
+				PromptTokens:     u.PromptTokens,
+				CompletionTokens: u.CompletionTokens,
+				TotalTokens:      u.TotalTokens,
+			}
+			chunk := adapter.MakeOpenAIStreamChunkWithUsage(model, "", true, openaiUsage)
+			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	} else if stream {
+		// 无 usage 事件时也要补发 [DONE]（streamWebToOpenAI 只发到 finish 块）
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	// 非流式：注入 usage 后写出响应体
+	if nonStreamBody != nil {
+		if u := gotUsage; u != nil {
+			var m map[string]interface{}
+			if json.Unmarshal(nonStreamBody, &m) == nil {
+				m["usage"] = map[string]int{
+					"prompt_tokens":     u.PromptTokens,
+					"completion_tokens": u.CompletionTokens,
+					"total_tokens":      u.TotalTokens,
+				}
+				nonStreamBody, _ = json.Marshal(m)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(nonStreamBody)
 	}
 
 	// 保存对话到 MiMo 官网 + 更新 parentId（仅在有实际内容时）
@@ -222,7 +262,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	}
 }
 
-func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, hasTools bool, gotUsage **usageData) {
+func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, hasTools bool) {
 	flusher := w.(http.Flusher)
 	inThinking := false
 
@@ -234,49 +274,25 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		flusher.Flush()
 	}
 
-	upstreamErr := ""
 	for event := range events {
-		switch event.Event {
-		case "message":
-			var msg struct {
-				Type    string `json:"type"`
-				Content string `json:"content"`
-			}
-			if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
-				continue
-			}
-			if msg.Type != "text" || msg.Content == "" {
-				continue
-			}
-			c := strings.ReplaceAll(msg.Content, "\u0000", "")
-			c, inThinking = filterThinkingChunk(c, inThinking)
-			if c == "" {
-				continue
-			}
-			buffered.WriteString(c)
-			// Stream text chunks immediately
-			writeChunk(c, false)
-		case "usage":
-			var u usageData
-			if json.Unmarshal([]byte(event.Data), &u) == nil {
-				*gotUsage = &u
-			}
-		case "error":
-			// 上游业务错误（如模型名称错误）——透传给客户端，不再静默
-			var e struct {
-				Type    string `json:"type"`
-				Content string `json:"content"`
-			}
-			json.Unmarshal([]byte(event.Data), &e)
-			if e.Content != "" {
-				upstreamErr = e.Content
-			}
+		var msg struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
 		}
-	}
-
-	if upstreamErr != "" && buffered.Len() == 0 {
-		writeError(w, http.StatusBadGateway, "mimo: "+upstreamErr)
-		return
+		if err := json.Unmarshal([]byte(event.Data), &msg); err != nil {
+			continue
+		}
+		if msg.Type != "text" || msg.Content == "" {
+			continue
+		}
+		c := strings.ReplaceAll(msg.Content, "\u0000", "")
+		c, inThinking = filterThinkingChunk(c, inThinking)
+		if c == "" {
+			continue
+		}
+		buffered.WriteString(c)
+		// Stream text chunks immediately
+		writeChunk(c, false)
 	}
 
 	finalText := strings.TrimSpace(buffered.String())
@@ -298,23 +314,9 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		}
 	}
 
-	// 收尾块携带 usage（客户端的"本轮用量"即来源于此）
-	var finalUsage *adapter.OpenAIUsage
-	if u := *gotUsage; u != nil {
-		finalUsage = &adapter.OpenAIUsage{
-			PromptTokens:     u.PromptTokens,
-			CompletionTokens: u.CompletionTokens,
-			TotalTokens:      u.TotalTokens,
-		}
-	}
-	writeChunkWithUsage := func(finish bool) {
-		chunk := adapter.MakeOpenAIStreamChunkWithUsage(model, "", finish, finalUsage)
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		flusher.Flush()
-	}
-	writeChunkWithUsage(true)
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	// 收尾 finish 块（usage 块与 [DONE] 由 handleWebChat 在拿到分发 goroutine
+	// 的最终 usage 后统一发送——流式的 usage 块必须在 [DONE] 之前）
+	writeChunk("", true)
 }
 
 // filterThinkingChunk 状态机方式过滤 thinking 内容
@@ -346,7 +348,7 @@ func filterThinkingChunk(content string, inThinking bool) (string, bool) {
 	return result.String(), inThinking
 }
 
-func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, gotUsage **usageData) {
+func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent) []byte {
 	var content strings.Builder
 	inThinking := false
 	upstreamErr := ""
@@ -366,11 +368,6 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 				c, inThinking = filterThinkingChunk(c, inThinking)
 				content.WriteString(c)
 			}
-		case "usage":
-			var u usageData
-			if json.Unmarshal([]byte(event.Data), &u) == nil {
-				*gotUsage = &u
-			}
 		case "error":
 			var e struct {
 				Type    string `json:"type"`
@@ -388,7 +385,7 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 	// 上游业务错误且没有任何正文 → 502 透传
 	if upstreamErr != "" && finalText == "" {
 		writeError(w, http.StatusBadGateway, "mimo: "+upstreamErr)
-		return
+		return nil
 	}
 
 	// 检测是否包含工具调用
@@ -406,23 +403,12 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write(resp)
-			return
+			return nil
 		}
 	}
 
-	// 非流式响应带 usage
-	var finalUsage *adapter.OpenAIUsage
-	if u := *gotUsage; u != nil {
-		finalUsage = &adapter.OpenAIUsage{
-			PromptTokens:     u.PromptTokens,
-			CompletionTokens: u.CompletionTokens,
-			TotalTokens:      u.TotalTokens,
-		}
-	}
-	resp := adapter.MakeOpenAIResponseWithUsage(model, finalText, finalUsage)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
+	// 非流式响应体（usage 由 handleWebChat 拿到分发 goroutine 的最终值后注入）
+	return adapter.MakeOpenAIResponse(model, finalText)
 }
 
 func toMiMoMessages(msgs []adapter.OpenAIMessage) []mimo.Message {
