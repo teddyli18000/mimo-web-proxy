@@ -41,6 +41,19 @@ func setBrowserHeaders(h http.Header) {
 	h.Set("sec-fetch-site", "same-origin")
 }
 
+// buildCookie 构造与浏览器完全一致的 Cookie 头。
+// 2026-09 实测（用户 DevTools）：上游的 serviceToken cookie 名带 xiaomichatbot_ 前缀，
+// 值外层带双引号（DevTools Cookie 面板显示 "..."）。
+// 双发两种名字 + 保留引号形态，最大化兼容新旧两种会话格式。
+func (c *WebClient) buildCookie() string {
+	token := strings.Trim(c.serviceToken, "\"")
+	ph := strings.Trim(c.ph, "\"")
+	return fmt.Sprintf(
+		"userId=%s; serviceToken=%s; xiaomichatbot_serviceToken=%q; xiaomichatbot_ph=%q",
+		c.userID, token, token, ph,
+	)
+}
+
 // WebClient 是 MiMo AI Studio 网页端客户端
 type WebClient struct {
 	httpClient *http.Client
@@ -59,18 +72,13 @@ func NewWebClient(serviceToken, userID, ph string) *WebClient {
 	}
 }
 
-// WebChatRequest 是网页端请求格式
+// WebChatRequest 是网页端请求格式（字段与 2026-09 浏览器抓包一致：
+// 32 位 hex 的 msgId/conversationId，仅 query+isEditedQuery+modelConfig+multiMedias）
 type WebChatRequest struct {
 	MsgID          string       `json:"msgId"`
 	ConversationID string       `json:"conversationId"`
 	Query          string       `json:"query"`
-	Messages       []interface{} `json:"messages"`
-	ParentID       string       `json:"parentId"`
-	Save           bool         `json:"save"`
 	IsEditedQuery  bool         `json:"isEditedQuery"`
-	Source         string       `json:"source"`
-	Scene          string       `json:"scene"`
-	IsLocal        bool         `json:"isLocal"`
 	ModelConfig    ModelConfig  `json:"modelConfig"`
 	MultiMedias    []interface{} `json:"multiMedias"`
 }
@@ -85,27 +93,18 @@ type ModelConfig struct {
 }
 
 // Chat 发起聊天，返回 SSE 流
-// conversationID: 客户端提供的对话 ID，用于复用 MiMo 对话
-// parentID: 上一条 AI 回复的消息 ID，用于维持上下文链
+// conversationID: 客户端提供的对话 ID（32 位 hex），用于复用 MiMo 服务端上下文
+// parentID: 保留参数（当前协议请求体不需要，仅用于将来兼容）
 func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, parentID string, thinking bool) (io.ReadCloser, error) {
 	if conversationID == "" {
-		conversationID = uuid.New().String()
-	}
-	if parentID == "" {
-		parentID = "0"
+		conversationID = strings.ReplaceAll(uuid.New().String(), "-", "")
 	}
 
 	reqBody := WebChatRequest{
-		MsgID:          uuid.New().String(),
+		MsgID:          strings.ReplaceAll(uuid.New().String(), "-", ""),
 		ConversationID: conversationID,
 		Query:          query,
-		Messages:       []interface{}{},
-		ParentID:       parentID,
-		Save:           true,
 		IsEditedQuery:  false,
-		Source:         "STATION",
-		Scene:          "STATION",
-		IsLocal:        false,
 		ModelConfig: ModelConfig{
 			EnableThinking:  thinking,
 			WebSearchStatus: "disabled",
@@ -128,10 +127,7 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 	}
 
 	setBrowserHeaders(httpReq.Header)
-	httpReq.Header.Set("Cookie", fmt.Sprintf(
-		"userId=%s; serviceToken=%q; xiaomichatbot_ph=%q",
-		c.userID, c.serviceToken, c.ph,
-	))
+	httpReq.Header.Set("Cookie", c.buildCookie())
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -211,10 +207,7 @@ func (c *WebClient) SaveConversation(ctx context.Context, conversationID, query 
 		return
 	}
 	setBrowserHeaders(req.Header)
-	req.Header.Set("Cookie", fmt.Sprintf(
-		"userId=%s; serviceToken=%q; xiaomichatbot_ph=%q",
-		c.userID, c.serviceToken, c.ph,
-	))
+	req.Header.Set("Cookie", c.buildCookie())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -229,16 +222,15 @@ func (c *WebClient) SaveConversation(ctx context.Context, conversationID, query 
 }
 
 // Validate 验证 Cookie 是否有效
+// 2026-09 实测：/open-apis/user/info 已下线（404），换用浏览器真实调用的
+// /open-apis/user/mi/get（与 ccp-p/mimo2api 等活跃项目一致）
 func (c *WebClient) Validate(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", webBaseURL+"/open-apis/user/info", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", webBaseURL+"/open-apis/user/mi/get", nil)
 	if err != nil {
 		return err
 	}
 	setBrowserHeaders(req.Header)
-	req.Header.Set("Cookie", fmt.Sprintf(
-		"userId=%s; serviceToken=%q; xiaomichatbot_ph=%q",
-		c.userID, c.serviceToken, c.ph,
-	))
+	req.Header.Set("Cookie", c.buildCookie())
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -246,6 +238,13 @@ func (c *WebClient) Validate(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("invalid: status %d", resp.StatusCode)
+	}
+	// 上游 200 时 body 里仍可能带业务错误码，进一步校验 code==0
+	var result struct {
+		Code int `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Code != 0 {
+		return fmt.Errorf("invalid: code %d", result.Code)
 	}
 	return nil
 }

@@ -43,7 +43,13 @@ export function ConfigPanel() {
         if (cfg.default_model) setDefaultModel(cfg.default_model)
         setAccounts(cfg.accounts || [])
       })
-      .catch(() => {})
+      .catch(err => {
+        if (err?.message === '401') {
+          alert(lang === 'zh'
+            ? '鉴权失败：请在下方 API Key 框填入密钥（默认 sk-mimo）后点「保存配置」'
+            : 'Unauthorized: fill in the API Key below (default sk-mimo) and click Save Config')
+        }
+      })
       .finally(() => setLoading(false))
   }
 
@@ -85,6 +91,13 @@ export function ConfigPanel() {
         setNewId(''); setNewToken(''); setNewUserId(''); setNewPh('')
         setShowAdd(false)
         loadConfig()
+      } else if (res.status === 401) {
+        alert(lang === 'zh'
+          ? '鉴权失败：请先在上方 API Key 框填入密钥（默认 sk-mimo），点「保存配置」后再添加账号'
+          : 'Unauthorized: fill in the API Key above (default sk-mimo) and click Save Config first')
+      } else {
+        const txt = await res.text().catch(() => '')
+        alert(lang === 'zh' ? `添加失败 (${res.status}): ${txt}` : `Add failed (${res.status}): ${txt}`)
       }
     } finally {
       setAdding(false)
@@ -98,7 +111,10 @@ export function ConfigPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id })
     })
-    if (res.ok) loadConfig()
+    if (res.ok) { loadConfig() }
+    else if (res.status === 401) {
+      alert(lang === 'zh' ? '鉴权失败：请先填入 API Key 并保存' : 'Unauthorized: save your API Key first')
+    }
   }
 
   const maskToken = (token: string) => {
