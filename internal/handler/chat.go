@@ -195,21 +195,19 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		log.Printf("[conv] continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
-	// 全量重放组装 query（serialize 会合并 system、渲染历史、高亮当前消息）
-	query := serializeMessages(req.Messages)
+	// 全量重放组装 query（serialize 会合并 system、渲染历史、高亮当前消息）。
+	// 工具定义计入 query 长度预算（各通道上限不同，见 router.MaxQueryCharsForModel）
+	var extraSys []string
+	if len(req.Tools) > 0 {
+		extraSys = append(extraSys, buildToolPrompt(req.Tools))
+	}
+	query := serializeMessages(req.Messages, router.MaxQueryCharsForModel(model), extraSys...)
 	if query == "" {
 		log.Printf("[filter] no valid user message")
 		writeError(w, http.StatusBadRequest, "no valid user message")
 		return
 	}
-
-	// Inject tool definitions into query so MiMo knows what tools are available
-	if len(req.Tools) > 0 {
-		toolPrompt := buildToolPrompt(req.Tools)
-		query = toolPrompt + "\n\n" + query
-		log.Printf("[tools] prompt with %d tools, query len=%d, convID=%s, parentID=%s",
-			len(req.Tools), len(query), convID[:8], parentID[:min(len(parentID), 8)])
-	}
+	log.Printf("[query] len=%d (budget=%d)", len(query), router.MaxQueryCharsForModel(model))
 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
@@ -449,22 +447,17 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 全量重放组装 query
-	query := serializeMessagesAnthropic(req.Messages, req.System)
+	hasTools := len(req.Tools) > 0
+	var extraSysA []string
+	if hasTools {
+		extraSysA = append(extraSysA, buildToolPrompt(adapter.ConvertAnthropicToolsToOpenAI(req.Tools)))
+	}
+	query := serializeMessagesAnthropic(req.Messages, req.System, router.MaxQueryCharsForModel(routeResult.Model), extraSysA...)
 	if query == "" {
 		log.Printf("[filter] no valid Anthropic user message")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "no valid user message"})
 		return
-	}
-
-	// Inject tool definitions into query so MiMo knows what tools are available
-	hasTools := len(req.Tools) > 0
-	if hasTools {
-		openaiTools := adapter.ConvertAnthropicToolsToOpenAI(req.Tools)
-		toolPrompt := buildToolPrompt(openaiTools)
-		query = toolPrompt + "\n\n" + query
-		log.Printf("[tools] Anthropic prompt with %d tools, query len=%d, convID=%s, parentID=%s",
-			len(req.Tools), len(query), convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
 	stats.Get().IncrConcurrency()

@@ -25,7 +25,7 @@ import (
 // =============================================================================
 
 // MaxQueryChars 单次请求的 query 字符上限（超出丢老历史，保 system 与最新消息）
-const MaxQueryChars = 90000
+
 
 // roleText 一条 (role, textContent)；convstore.Fingerprint 接受 [][2]string
 type roleText = [2]string
@@ -98,17 +98,17 @@ func renderToolResult(toolCallID string, content interface{}) string {
 }
 
 // serializeMessages 全量重放组装 query（extraSystem: 额外注入 system 的文本如工具定义，纳入长度预算）
-func serializeMessages(msgs []adapter.OpenAIMessage, extraSystem ...string) string {
-	return serializeRoleTexts(toRoleTexts(msgs), extraSystem)
+func serializeMessages(msgs []adapter.OpenAIMessage, maxChars int, extraSystem ...string) string {
+	return serializeRoleTexts(toRoleTexts(msgs), maxChars, extraSystem...)
 }
 
 // serializeMessagesAnthropic Anthropic 版
-func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string, extraSystem ...string) string {
-	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), extraSystem)
+func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string, maxChars int, extraSystem ...string) string {
+	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), maxChars, extraSystem...)
 }
 
 // serializeRoleTexts 三段式渲染 + 长度截断（extraSystem 并入 System 段并计入预算）
-func serializeRoleTexts(rts []roleText, extraSystem []string) string {
+func serializeRoleTexts(rts []roleText, maxChars int, extraSystem ...string) string {
 	var system []string
 	var rest []roleText
 	for _, m := range rts {
@@ -160,12 +160,12 @@ func serializeRoleTexts(rts []roleText, extraSystem []string) string {
 	}
 
 	// 超限：从历史段头部截（保留 Current Query 完整）
-	if utf8.RuneCountInString(body) > MaxQueryChars {
+	if utf8.RuneCountInString(body) > maxChars {
 		sysPart := ""
 		if sysStr != "" {
 			sysPart = sysStr + "\n\n"
 		}
-		budget := MaxQueryChars - utf8.RuneCountInString(sysPart) - 40
+		budget := maxChars - utf8.RuneCountInString(sysPart) - 40
 		if budget < 2000 {
 			budget = 2000
 		}

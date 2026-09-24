@@ -145,3 +145,12 @@ func SupportedModels() []map[string]interface{} {
 		},
 	}
 }
+
+// MaxQueryCharsForModel 返回该模型通道的单次 query 字符上限。
+// fastchat 通道（ultraspeed）实测约 48.7K 就拒绝，open-apis 约 100K。
+func MaxQueryCharsForModel(model string) int {
+	if model == ModelV26UltraSpeed {
+		return 45000 // fastchat 实测 48750 OK / 50000 拒，留余量
+	}
+	return 90000 // open-apis 实测 ~100K 拒，留余量
+}
