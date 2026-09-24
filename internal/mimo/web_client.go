@@ -132,26 +132,45 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 		chatPath = ultraChatAPI
 	}
 	reqURL := fmt.Sprintf("%s%s?xiaomichatbot_ph=%s", webBaseURL, chatPath, url.QueryEscape(c.ph))
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
 
-	setBrowserHeaders(httpReq.Header)
-	httpReq.Header.Set("Cookie", c.buildCookie())
+	// 上游 429（请求过于频繁）/5xx 时透明重试：
+	// agent 客户端（如 DSH）高频调用会触发限流，透传 429 会导致客户端
+	// 用自己的重试策略继续打同一通道、全线失败（2026-09 DSH 会话实测）。
+	// 指数退避 2s/4s/8s，最多 3 次重试；鉴权类错误（401/403）不重试。
+	const maxRetries = 3
+	for attempt := 0; ; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		setBrowserHeaders(httpReq.Header)
+		httpReq.Header.Set("Cookie", c.buildCookie())
 
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return resp.Body, nil
+		}
+
 		errBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		if retryable && attempt < maxRetries {
+			backoff := time.Duration(2<<attempt) * time.Second // 2s, 4s, 8s
+			log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff)
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("mimo %d: %s (cancelled during retry backoff)", resp.StatusCode, string(errBody))
+			case <-time.After(backoff):
+			}
+			continue
+		}
 		return nil, fmt.Errorf("mimo returned %d: %s", resp.StatusCode, string(errBody))
 	}
-
-	return resp.Body, nil
 }
 
 // WebSSEEvent 是网页端 SSE 事件

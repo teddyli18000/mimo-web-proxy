@@ -40,3 +40,7 @@ Thumbs.db
 
 # Test config with real credentials
 config.test.json
+
+# Build artifacts
+mimo-web-proxy.exe~
+*.exe~
