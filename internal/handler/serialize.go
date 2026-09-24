@@ -97,18 +97,18 @@ func renderToolResult(toolCallID string, content interface{}) string {
 	return "[Tool Result]" + ref + ":\n" + prompt.NormalizeContent(content)
 }
 
-// serializeMessages 全量重放组装 query
-func serializeMessages(msgs []adapter.OpenAIMessage) string {
-	return serializeRoleTexts(toRoleTexts(msgs))
+// serializeMessages 全量重放组装 query（extraSystem: 额外注入 system 的文本如工具定义，纳入长度预算）
+func serializeMessages(msgs []adapter.OpenAIMessage, extraSystem ...string) string {
+	return serializeRoleTexts(toRoleTexts(msgs), extraSystem)
 }
 
 // serializeMessagesAnthropic Anthropic 版
-func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string) string {
-	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system))
+func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string, extraSystem ...string) string {
+	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), extraSystem)
 }
 
-// serializeRoleTexts 三段式渲染 + 长度截断
-func serializeRoleTexts(rts []roleText) string {
+// serializeRoleTexts 三段式渲染 + 长度截断（extraSystem 并入 System 段并计入预算）
+func serializeRoleTexts(rts []roleText, extraSystem []string) string {
 	var system []string
 	var rest []roleText
 	for _, m := range rts {
@@ -127,6 +127,9 @@ func serializeRoleTexts(rts []roleText) string {
 		return ""
 	}
 
+	if len(extraSystem) > 0 {
+		system = append(append([]string{}, system...), extraSystem...)
+	}
 	var sysStr string
 	if len(system) > 0 {
 		sysStr = "[System Instruction]\n" + strings.Join(system, "\n\n")
