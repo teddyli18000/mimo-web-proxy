@@ -274,6 +274,11 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		flusher.Flush()
 	}
 
+	// 带 tools 的请求：先完整缓冲再决定输出形式。
+	// 边收边发会导致"裸 DSML/tool_call 文本先流给客户端、tool_calls 块最后又发一次"
+	// （客户端把工具调用语法当正文显示，2026-09 DSH 实测）。无 tools 时保持逐块实时流式。
+	// 无 tools：直接发（不缓冲）
+	// 有 tools：先缓冲，结束时若为 tool_calls 只发 tool_calls，否则一次性发正文
 	for event := range events {
 		var msg struct {
 			Type    string `json:"type"`
@@ -291,8 +296,10 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 			continue
 		}
 		buffered.WriteString(c)
-		// Stream text chunks immediately
-		writeChunk(c, false)
+		if !hasTools {
+			// 无工具场景不存在工具语法歧义，逐块实时流式
+			writeChunk(c, false)
+		}
 	}
 
 	finalText := strings.TrimSpace(buffered.String())
@@ -306,12 +313,18 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		if len(calls) > 0 {
 			toolCalls := toolcall.ConvertToolCallsToOpenAI(calls)
 			log.Printf("[tools] detected %d tool calls in stream", len(toolCalls))
+			// 只发 tool_calls，不再把裸语法文本发给客户端
 			toolChunk := adapter.MakeOpenAIStreamToolCallChunk(model, toolCalls, true)
 			fmt.Fprintf(w, "data: %s\n\n", toolChunk)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
 		}
+	}
+
+	// 非 tool_calls：正文输出。带 tools 时此前一直在缓冲，这里一次性发出
+	if s := buffered.String(); s != "" {
+		writeChunk(s, false)
 	}
 
 	// 收尾 finish 块（usage 块与 [DONE] 由 handleWebChat 在拿到分发 goroutine
