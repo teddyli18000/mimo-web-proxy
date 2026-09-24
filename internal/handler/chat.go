@@ -14,7 +14,6 @@ import (
 	"github.com/teddyli18000/mimo-web-proxy/internal/convstore"
 	"github.com/teddyli18000/mimo-web-proxy/internal/mimo"
 	"github.com/teddyli18000/mimo-web-proxy/internal/pool"
-	"github.com/teddyli18000/mimo-web-proxy/internal/promptcompat"
 	"github.com/teddyli18000/mimo-web-proxy/internal/router"
 	"github.com/teddyli18000/mimo-web-proxy/internal/stats"
 	"github.com/teddyli18000/mimo-web-proxy/internal/toolcall"
@@ -85,7 +84,11 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	h.handleWebChat(ctx, w, &req, routeResult.Model, req.Stream)
 }
 
-// handleWebChat 使用网页端反代 — 有状态模式（复用 MiMo conversationId + parentId）
+// handleWebChat 使用网页端反代 — 混合模式：
+// query 组装 = 全量重放（system + 全部历史 + 当前消息，参考 meny2333/mimo2api_go 的
+// serializeMessages 设计），解决 agent 客户端注入型 user 消息吞掉真实提问的问题；
+// 会话连续性 = fingerprint 前缀延续判断（agent 循环追加历史 → 复用 MiMo 服务端上下文；
+// 新会话 → 全新 conversationId）。
 func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, req *adapter.OpenAIChatRequest, model string, stream bool) {
 	client, err := h.pool.Next()
 	if err != nil {
@@ -93,28 +96,31 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
-	// Extract latest user message as query (not full history)
-	// Skip auto-generated messages like "predict next message" from MiMo Code
-	query := extractLatestOpenAIUserMessage(req.Messages)
+	// 组装 (role, text) 序列供 fingerprint 与 serialize 共用
+	roleTexts := toRoleTexts(req.Messages)
+
+	// 会话解析：fingerprint 前缀延续 → 复用；否则新建
+	convID, parentID, isNew := h.convStore.Resolve(roleTexts)
+	if isNew {
+		log.Printf("[conv] new conversation %s (model=%s)", convID[:8], model)
+	} else {
+		log.Printf("[conv] continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
+	}
+
+	// 全量重放组装 query（serialize 会合并 system、渲染历史、高亮当前消息）
+	query := serializeMessages(req.Messages)
 	if query == "" {
-		// All user messages were auto-generated (e.g. predict next message) — skip
-		log.Printf("[filter] all user messages auto-generated, returning empty response")
+		log.Printf("[filter] no valid user message")
 		writeError(w, http.StatusBadRequest, "no valid user message")
 		return
 	}
-
-	// Look up or create conversation using hash of first message as key
-	firstMsg := extractFirstOpenAIUserMessage(req.Messages)
-	key := convstore.DeriveKey(firstMsg, model)
-	convID, parentID := h.convStore.GetOrCreate(key)
 
 	// Inject tool definitions into query so MiMo knows what tools are available
 	if len(req.Tools) > 0 {
 		toolPrompt := buildToolPrompt(req.Tools)
 		query = toolPrompt + "\n\n" + query
-		log.Printf("[tools] stateful prompt with %d tools, query len=%d, key=%s, convID=%s, parentID=%s",
-			len(req.Tools), len(query), key[:8], convID[:8], parentID[:min(len(parentID), 8)])
-		log.Printf("[tools] query content: %q", query[:min(len(query), 300)])
+		log.Printf("[tools] prompt with %d tools, query len=%d, convID=%s, parentID=%s",
+			len(req.Tools), len(query), convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
 	stats.Get().IncrConcurrency()
@@ -255,10 +261,10 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		go client.SaveConversation(context.Background(), convID, query, model == router.ModelV26UltraSpeed)
 	}
 	if lastMsgID := <-lastMsgIDChan; lastMsgID != "" && hasContent {
-		h.convStore.SetParentID(key, lastMsgID)
-		log.Printf("[conv] updated parentId for key=%s convID=%s: %s", key[:8], convID[:8], lastMsgID[:min(len(lastMsgID), 8)])
+		h.convStore.SetParentID(convID, lastMsgID)
+		log.Printf("[conv] updated parentId for convID=%s: %s", convID[:8], lastMsgID[:min(len(lastMsgID), 8)])
 	} else if !hasContent {
-		log.Printf("[conv] empty response, keeping previous parentId for key=%s convID=%s", key[:8], convID[:8])
+		log.Printf("[conv] empty response, keeping previous parentId for convID=%s", convID[:8])
 	}
 }
 
@@ -485,29 +491,34 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract latest user message as query (not full history)
-	hasTools := len(req.Tools) > 0
-	query := promptcompat.ExtractLatestUserMessage(req.Messages)
+	// 组装 (role, text) 序列供 fingerprint 与 serialize 共用
+	roleTexts := toRoleTextsAnthropic(req.Messages, req.System)
+
+	// 会话解析：fingerprint 前缀延续 → 复用；否则新建
+	convID, parentID, isNew := h.convStore.Resolve(roleTexts)
+	if isNew {
+		log.Printf("[conv] Anthropic new conversation %s (model=%s)", convID[:8], routeResult.Model)
+	} else {
+		log.Printf("[conv] Anthropic continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
+	}
+
+	// 全量重放组装 query
+	query := serializeMessagesAnthropic(req.Messages, req.System)
 	if query == "" {
-		// All user messages were auto-generated (e.g. predict next message) — skip
-		log.Printf("[filter] all Anthropic user messages auto-generated, returning empty response")
+		log.Printf("[filter] no valid Anthropic user message")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "no valid user message"})
 		return
 	}
 
-	// Look up or create conversation using hash of first message as key
-	firstMsg := promptcompat.ExtractFirstUserMessage(req.Messages)
-	key := convstore.DeriveKey(firstMsg, routeResult.Model)
-	convID, parentID := h.convStore.GetOrCreate(key)
-
 	// Inject tool definitions into query so MiMo knows what tools are available
+	hasTools := len(req.Tools) > 0
 	if hasTools {
 		openaiTools := adapter.ConvertAnthropicToolsToOpenAI(req.Tools)
 		toolPrompt := buildToolPrompt(openaiTools)
 		query = toolPrompt + "\n\n" + query
-		log.Printf("[tools] stateful Anthropic prompt with %d tools, query len=%d, key=%s, convID=%s, parentID=%s",
-			len(req.Tools), len(query), key[:8], convID[:8], parentID[:min(len(parentID), 8)])
+		log.Printf("[tools] Anthropic prompt with %d tools, query len=%d, convID=%s, parentID=%s",
+			len(req.Tools), len(query), convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
 	stats.Get().IncrConcurrency()
@@ -733,10 +744,10 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// 更新 parentId + 同步网页端历史（仅在有实际内容时）
 	hasContent := <-hasContentChan
 	if lastMsgID := <-lastMsgIDChan; lastMsgID != "" && hasContent {
-		h.convStore.SetParentID(key, lastMsgID)
-		log.Printf("[conv] Anthropic: updated parentId for key=%s convID=%s: %s", key[:8], convID[:8], lastMsgID[:min(len(lastMsgID), 8)])
+		h.convStore.SetParentID(convID, lastMsgID)
+		log.Printf("[conv] Anthropic: updated parentId for convID=%s: %s", convID[:8], lastMsgID[:min(len(lastMsgID), 8)])
 	} else if !hasContent {
-		log.Printf("[conv] Anthropic: empty response, keeping previous parentId for key=%s convID=%s", key[:8], convID[:8])
+		log.Printf("[conv] Anthropic: empty response, keeping previous parentId for convID=%s", convID[:8])
 	}
 	// 保存对话到 MiMo 官网历史记录
 	if hasContent {
