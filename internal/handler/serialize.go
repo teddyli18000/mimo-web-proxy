@@ -25,7 +25,7 @@ import (
 // =============================================================================
 
 // MaxQueryChars 单次请求的 query 字符上限（超出丢老历史，保 system 与最新消息）
-const MaxQueryChars = 120000
+const MaxQueryChars = 90000
 
 // roleText 一条 (role, textContent)；convstore.Fingerprint 接受 [][2]string
 type roleText = [2]string

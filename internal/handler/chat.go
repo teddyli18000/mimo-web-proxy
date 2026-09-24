@@ -285,7 +285,21 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 	// （客户端把工具调用语法当正文显示，2026-09 DSH 实测）。无 tools 时保持逐块实时流式。
 	// 无 tools：直接发（不缓冲）
 	// 有 tools：先缓冲，结束时若为 tool_calls 只发 tool_calls，否则一次性发正文
+	upstreamErr := ""
 	for event := range events {
+		if event.Event == "error" {
+			// 上游业务错误（文本超长/模型名错误/风控提示）——记录，流结束后统一处理。
+			// 此前流式路径吞掉该事件返回空 200，客户端只看到"空回复"无任何提示。
+			var e struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			json.Unmarshal([]byte(event.Data), &e)
+			if e.Content != "" {
+				upstreamErr = e.Content
+			}
+			continue
+		}
 		var msg struct {
 			Type    string `json:"type"`
 			Content string `json:"content"`
@@ -306,6 +320,12 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 			// 无工具场景不存在工具语法歧义，逐块实时流式
 			writeChunk(c, false)
 		}
+	}
+
+	// 上游业务错误优先：收到 error 事件且无实质正文 → 502 明确报错
+	if upstreamErr != "" && buffered.Len() == 0 {
+		writeError(w, http.StatusBadGateway, "mimo: "+upstreamErr)
+		return
 	}
 
 	finalText := strings.TrimSpace(buffered.String())
