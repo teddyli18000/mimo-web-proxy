@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -9,6 +12,109 @@ import (
 
 func msg(role, text string) adapter.OpenAIMessage {
 	return adapter.OpenAIMessage{Role: role, Content: text}
+}
+
+func amsg(role string, content interface{}) adapter.AnthropicMessage {
+	return adapter.AnthropicMessage{Role: role, Content: content}
+}
+
+func TestCurrentTurnQuestionAnthropic(t *testing.T) {
+	toolResult := []interface{}{
+		map[string]interface{}{"type": "tool_result", "tool_use_id": "t1", "content": "命令输出"},
+	}
+	cases := []struct {
+		name string
+		msgs []adapter.AnthropicMessage
+		want string
+	}{
+		{
+			name: "首轮提问",
+			msgs: []adapter.AnthropicMessage{amsg("user", "帮我看看日志")},
+			want: "帮我看看日志",
+		},
+		{
+			name: "工具结果轮不把工具输出当提问",
+			msgs: []adapter.AnthropicMessage{
+				amsg("user", "帮我看看日志"),
+				amsg("assistant", "好的"),
+				amsg("user", toolResult),
+			},
+			want: "",
+		},
+		{
+			name: "工具结果后追加新指令",
+			msgs: []adapter.AnthropicMessage{
+				amsg("user", "帮我看看日志"),
+				amsg("assistant", "好的"),
+				amsg("user", toolResult),
+				amsg("user", "顺便把配置也检查一下"),
+			},
+			want: "顺便把配置也检查一下",
+		},
+		{
+			name: "注入上下文不算提问",
+			msgs: []adapter.AnthropicMessage{
+				amsg("assistant", "上轮回答"),
+				amsg("user", "<system-reminder>只有注入</system-reminder>"),
+			},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := currentTurnQuestionAnthropic(c.msgs); got != c.want {
+				t.Errorf("currentTurnQuestionAnthropic() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsAnthropicToolResult(t *testing.T) {
+	onlyResult := []interface{}{map[string]interface{}{"type": "tool_result", "content": "x"}}
+	mixed := []interface{}{
+		map[string]interface{}{"type": "tool_result", "content": "x"},
+		map[string]interface{}{"type": "text", "text": "补充说明"},
+	}
+	if !isAnthropicToolResult(amsg("user", onlyResult)) {
+		t.Error("纯 tool_result 应判定为工具结果")
+	}
+	if isAnthropicToolResult(amsg("user", mixed)) {
+		t.Error("含文本块的混合消息不应判定为纯工具结果")
+	}
+	if isAnthropicToolResult(amsg("user", "普通文本")) {
+		t.Error("字符串内容不应判定为工具结果")
+	}
+	if isAnthropicToolResult(amsg("user", []interface{}{})) {
+		t.Error("空块列表不应判定为工具结果")
+	}
+}
+
+func TestWriteAnthropicErrorShape(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeAnthropicError(rec, http.StatusBadRequest, "bad input")
+
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var body struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if body.Type != "error" {
+		t.Errorf("type = %q, want error", body.Type)
+	}
+	if body.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want invalid_request_error", body.Error.Type)
+	}
+	if body.Error.Message != "bad input" {
+		t.Errorf("error.message = %q", body.Error.Message)
+	}
 }
 
 func TestCurrentTurnQuestion(t *testing.T) {

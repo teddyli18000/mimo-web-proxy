@@ -429,6 +429,35 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
+// writeAnthropicError 按 Anthropic 规范返回错误：
+//
+//	{"type":"error","error":{"type":"invalid_request_error","message":"…"}}
+//
+// 此前返回 {"error":"…"} 且未设置 Content-Type，官方 SDK 无法取到 err.type
+// 与 err.message（2026-09 协议审查发现）。
+func writeAnthropicError(w http.ResponseWriter, status int, msg string) {
+	errType := "api_error"
+	switch {
+	case status == http.StatusBadRequest:
+		errType = "invalid_request_error"
+	case status == http.StatusUnauthorized:
+		errType = "authentication_error"
+	case status == http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case status == http.StatusServiceUnavailable:
+		errType = "overloaded_error"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errType,
+			"message": msg,
+		},
+	})
+}
+
 func ModelsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -450,8 +479,7 @@ func NewMessagesHandler(p *pool.Pool, cs *convstore.Store) *MessagesHandler {
 func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var req adapter.AnthropicRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		writeAnthropicError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -461,15 +489,13 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if !h.pool.HasAccounts() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"error": "no accounts configured"})
+		writeAnthropicError(w, http.StatusServiceUnavailable, "no accounts configured")
 		return
 	}
 
 	client, err := h.pool.Next()
 	if err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeAnthropicError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
@@ -484,9 +510,17 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[conv] Anthropic continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
-	// query 组装：新会话完整上下文 + 完整工具 schema；延续会话仅增量 + 紧凑工具名提醒
+	// query 组装：新会话完整上下文 + 完整工具 schema；延续会话仅增量 + 紧凑工具名提醒。
+	// 与 OpenAI 路径一致，工具结果轮要带上任务锚点。
 	hasTools := len(req.Tools) > 0
 	budgetA := router.MaxQueryCharsForModel(routeResult.Model)
+	turnQuestionA := currentTurnQuestionAnthropic(req.Messages)
+	if turnQuestionA != "" {
+		h.convStore.SetTask(convID, turnQuestionA)
+	}
+	taskAnchorA := h.convStore.Task(convID)
+	useAnchorA := !isNew && turnQuestionA == "" && taskAnchorA != ""
+
 	buildQueryA := func(full bool) string {
 		msgs := req.Messages
 		if !full {
@@ -501,6 +535,9 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				extra = append(extra, r)
 			}
 		}
+		if !full && useAnchorA {
+			extra = append(extra, "Current task (the user's request you are working on): "+taskAnchorA)
+		}
 		return serializeMessagesAnthropic(msgs, req.System, budgetA, extra...)
 	}
 	query := buildQueryA(isNew)
@@ -509,11 +546,15 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if query == "" {
 		log.Printf("[filter] no valid Anthropic user message")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "no valid user message"})
+		writeAnthropicError(w, http.StatusBadRequest, "no valid user message")
 		return
 	}
-	log.Printf("[query] Anthropic len=%d budget=%d mode=%s", len(query), budgetA, map[bool]string{true: "full", false: "delta"}[isNew])
+	anchorNoteA := ""
+	if useAnchorA {
+		anchorNoteA = fmt.Sprintf(" anchor=%d", len(taskAnchorA))
+	}
+	log.Printf("[query] Anthropic len=%d budget=%d mode=%s%s", len(query), budgetA,
+		map[bool]string{true: "full", false: "delta"}[isNew], anchorNoteA)
 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
@@ -527,16 +568,14 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		result, err = collectWebResult(ctx, client, query, routeResult.Model, curConvID, curParentID)
 		if err != nil {
 			log.Printf("[error] Anthropic web chat (attempt %d): %v", attempt+1, err)
-			w.WriteHeader(http.StatusBadGateway)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			writeAnthropicError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 
 		// 上游明确业务错误（如文本超长）且无有效正文 → 不重试直接报错
 		if result.UpstreamErr != "" && result.Text == "" {
 			log.Printf("[error] Anthropic mimo upstream error: %s", result.UpstreamErr)
-			w.WriteHeader(http.StatusBadGateway)
-			json.NewEncoder(w).Encode(map[string]string{"error": "mimo: " + result.UpstreamErr})
+			writeAnthropicError(w, http.StatusBadGateway, "mimo: " + result.UpstreamErr)
 			return
 		}
 
@@ -549,8 +588,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf("[error] Anthropic mimo returned an empty response after retry")
-			w.WriteHeader(http.StatusBadGateway)
-			json.NewEncoder(w).Encode(map[string]string{"error": "mimo returned an empty response (after retry)"})
+			writeAnthropicError(w, http.StatusBadGateway, "mimo returned an empty response (after retry)")
 			return
 		}
 

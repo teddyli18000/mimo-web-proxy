@@ -129,13 +129,9 @@ func currentTurnQuestion(msgs []adapter.OpenAIMessage) string {
 
 // looksLikeInjectedContext 粗判一段文本是否为客户端注入的上下文而非用户提问。
 // 覆盖 DSH 的 <system-reminder> / runtime context 形态；命中时宁可不记锚点，
-// 也好过把注入内容当成任务。
+// 也好过把注入内容当成任务。（TrimSpace 只返回切片，不复制整段文本）
 func looksLikeInjectedContext(s string) bool {
-	head := s
-	if len(head) > 200 {
-		head = head[:200]
-	}
-	head = strings.TrimSpace(head)
+	head := strings.TrimSpace(s)
 	return strings.HasPrefix(head, "<system-reminder>") ||
 		strings.HasPrefix(head, "Current runtime context") ||
 		strings.HasPrefix(head, "Current DSH")
@@ -189,10 +185,46 @@ func DeltaMessagesAnthropic(msgs []adapter.AnthropicMessage) []adapter.Anthropic
 	return msgs
 }
 
+// currentTurnQuestionAnthropic Anthropic 版本轮提问。
+// Anthropic 把工具结果也放在 user 消息里，必须跳过纯 tool_result 的消息，
+// 否则工具输出会被当成用户提问记录下来。
+func currentTurnQuestionAnthropic(msgs []adapter.AnthropicMessage) string {
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	for _, m := range msgs[lastAssistant+1:] {
+		if m.Role != "user" || isAnthropicToolResult(m) {
+			continue
+		}
+		if q := strings.TrimSpace(anthropicMessageText(m)); q != "" && !looksLikeInjectedContext(q) {
+			return q
+		}
+	}
+	return ""
+}
+
+// isAnthropicToolResult 判断该 user 消息是否只是工具结果回传（不含用户文本）
+func isAnthropicToolResult(m adapter.AnthropicMessage) bool {
+	blocks, ok := m.Content.([]interface{})
+	if !ok || len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		bm, ok := b.(map[string]interface{})
+		if !ok || bm["type"] != "tool_result" {
+			return false
+		}
+	}
+	return true
+}
+
 // serializeMessagesAnthropic Anthropic 版
 func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string, maxChars int, extraSystem ...string) string {
-	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), maxChars, extraSystem...)
-}
+	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), maxChars, extraSystem...)}
 
 // serializeRoleTexts 三段式渲染 + 长度截断（extraSystem 并入 System 段并计入预算）
 func serializeRoleTexts(rts []roleText, maxChars int, extraSystem ...string) string {
