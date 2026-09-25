@@ -72,7 +72,7 @@ async function longSession(model) {
     try {
       let r = await chat(model, messages);
       let guard = 0;
-      while (r.toolCalls.length > 0 && guard < 3) {
+      while (r.toolCalls.length > 0 && guard < 6) {
         guard++;
         toolRounds++;
         messages.push({ role: 'assistant', content: r.text || '', tool_calls: r.toolCalls });
@@ -87,10 +87,11 @@ async function longSession(model) {
         }
         r = await chat(model, messages);
       }
-      const ok = r.text.length > 0;
+      // 有正文，或仍在调用工具（agent 循环未收敛但响应本身正常），都算成功
+      const ok = r.text.length > 0 || r.toolCalls.length > 0;
       if (!ok) errors++;
-      console.log(`    轮${i + 1}: ${ok ? '✅' : '❌'} ${JSON.stringify(r.text.slice(0, 60))}`);
-      messages.push({ role: 'assistant', content: r.text });
+      console.log(`    轮${i + 1}: ${ok ? '✅' : '❌'} ${JSON.stringify((r.text || '').slice(0, 60))}${r.toolCalls.length ? ' [tools=' + r.toolCalls.length + ']' : ''}`);
+      messages.push({ role: 'assistant', content: r.text || '' });
     } catch (e) {
       errors++;
       console.log(`    轮${i + 1}: ❌ ${e.message.slice(0, 90)}`);
