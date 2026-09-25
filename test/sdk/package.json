@@ -1,0 +1,17 @@
+{
+  "name": "mimo-web-proxy-sdk-tests",
+  "private": true,
+  "type": "module",
+  "description": "Integration tests using the official OpenAI / Anthropic SDKs",
+  "scripts": {
+    "stability": "node stability.mjs",
+    "anthropic": "node anthropic.mjs",
+    "long-session": "node long-session.mjs",
+    "long-output": "node long-output.mjs",
+    "tools": "node tool-focus.mjs"
+  },
+  "dependencies": {
+    "openai": "^6.40.0",
+    "@anthropic-ai/sdk": "^0.68.0"
+  }
+}
