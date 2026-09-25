@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,9 +70,20 @@ type WebClient struct {
 }
 
 // NewWebClient 创建网页端客户端
+//
+// 整体超时放到 30 分钟（长回答的 SSE 流可能持续很久），但给「等到响应头」单独设上界：
+// 上游偶发挂起时不再干等半小时（2026-09 实测出现过近 3 分钟无响应的请求）。
 func NewWebClient(serviceToken, userID, ph string) *WebClient {
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 120 * time.Second,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+	}
 	return &WebClient{
-		httpClient:   &http.Client{Timeout: 30 * time.Minute},
+		httpClient:   &http.Client{Timeout: 30 * time.Minute, Transport: transport},
 		serviceToken: serviceToken,
 		userID:       userID,
 		ph:           ph,
@@ -135,7 +147,15 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 	// fastchat（ultraspeed）通道限流更严，429 给到 5 次、退避至 16s。
 	// 每次尝试都重新生成 msgId：上游按 msgId 去重，复用同一 msgId 重发会得到
 	// "请求已处理，请勿重复提交"（参考 Fu-Jie/mimo-free-api-mcp 的重试实现）。
-	const maxRetries = 5
+	//
+	// 重试总时长设上界：限流持续时反复退避会让一次调用拖到几分钟（2026-09 实测
+	// DSH 会话里出现过近 3 分钟才报错），对交互式 agent 客户端体验极差。
+	// 超预算就把最后一次的上游错误如实返回，交给客户端决定是否重试。
+	const (
+		maxRetries  = 5
+		retryBudget = 60 * time.Second
+	)
+	deadline := time.Now().Add(retryBudget)
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			reqBody.MsgID = strings.ReplaceAll(uuid.New().String(), "-", "")
@@ -165,13 +185,16 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 		resp.Body.Close()
 
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		if retryable && attempt < maxRetries {
+		if retryable && attempt < maxRetries && time.Now().Before(deadline) {
 			// 2s, 4s, 8s, 16s, 16s（封顶 16s）；加 0~1s 抖动避免并发请求同步重试
 			secs := 1 << (attempt + 1)
 			if secs > 16 {
 				secs = 16
 			}
 			backoff := time.Duration(secs)*time.Second + time.Duration(rand.Int63n(1000))*time.Millisecond
+			if remaining := time.Until(deadline); backoff > remaining {
+				backoff = remaining
+			}
 			log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff.Round(time.Millisecond))
 			select {
 			case <-ctx.Done():
