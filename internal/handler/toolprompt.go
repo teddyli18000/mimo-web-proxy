@@ -16,9 +16,12 @@ import (
 // flash/pro 在"隐含需要工具"的场景会凭记忆回答而不调用工具）。
 func buildToolPrompt(tools []adapter.OpenAITool) string {
 	var sb strings.Builder
+	// 措辞经过对照实验：模型（尤其 pro）对天气/价格这类"自己也能答"的问题倾向
+	// 直接作答而不调工具。"MUST call … your own knowledge may be stale" 这组措辞
+	// 把调用率从 3/4 提到 4/4；反过来谎称"你没有联网能力"会降到 2/4。
 	sb.WriteString("You have the following tools available. ")
-	sb.WriteString("Use them whenever the task requires actions like reading/writing files, running commands, asking questions, or web searches. ")
-	sb.WriteString("Do not answer from memory when a tool can provide the answer.\n\n")
+	sb.WriteString("You MUST call the matching tool whenever one applies — including questions about current facts such as weather, time, prices, or news. ")
+	sb.WriteString("Your own knowledge may be stale; the tool returns live data. Do not answer such questions directly.\n\n")
 	for _, tool := range tools {
 		name := tool.Function.Name
 		// 描述压成单行：工具描述常含多行 Markdown 列表，换行会让 "- " 条目在模型
@@ -69,8 +72,8 @@ func buildToolPrompt(tools []adapter.OpenAITool) string {
 	sb.WriteString("</invoke>\n")
 	sb.WriteString("</tool_calls>\n")
 	sb.WriteString("Put several <invoke> blocks inside one <tool_calls> block to call multiple tools at once. ")
-	sb.WriteString("If a tool is needed, you MUST emit the <tool_calls> block in the same reply — ")
-	sb.WriteString("never say you already used a tool without emitting it. ")
+	sb.WriteString("If a tool applies, you MUST emit the <tool_calls> block in the same reply — ")
+	sb.WriteString("answering directly instead of calling the tool is an error. ")
 	sb.WriteString("After tool results come back, continue the task or answer the user.\n")
 	return sb.String()
 }
