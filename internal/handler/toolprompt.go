@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/teddyli18000/mimo-web-proxy/internal/adapter"
@@ -24,17 +25,37 @@ func buildToolPrompt(tools []adapter.OpenAITool) string {
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 		if tool.Function.Parameters != nil {
 			if params, ok := tool.Function.Parameters.(map[string]interface{}); ok {
-				if props, ok := params["properties"].(map[string]interface{}); ok && len(props) > 0 {
-					sb.WriteString("  Parameters: ")
-					first := true
-					for pname := range props {
-						if !first {
-							sb.WriteString(", ")
-						}
-						sb.WriteString(pname)
-						first = false
+				props, _ := params["properties"].(map[string]interface{})
+				required, _ := params["required"].([]interface{})
+				reqSet := make(map[string]bool, len(required))
+				for _, r := range required {
+					if s, ok := r.(string); ok {
+						reqSet[s] = true
 					}
-					sb.WriteString("\n")
+				}
+				if len(props) > 0 {
+					// 参数必须带类型与必填标记：只列名字时模型经常漏必填项
+					// （2026-09 实测：DSH 会话反复出现 missing required property "description"/"pattern"）
+					names := make([]string, 0, len(props))
+					for pname := range props {
+						names = append(names, pname)
+					}
+					sort.Strings(names)
+					specs := make([]string, 0, len(names))
+					for _, pname := range names {
+						pType := "any"
+						if pm, ok := props[pname].(map[string]interface{}); ok {
+							if t, ok := pm["type"].(string); ok && t != "" {
+								pType = t
+							}
+						}
+						mark := ""
+						if reqSet[pname] {
+							mark = " (required)"
+						}
+						specs = append(specs, fmt.Sprintf("%s: %s%s", pname, pType, mark))
+					}
+					sb.WriteString("  Parameters: " + strings.Join(specs, ", ") + "\n")
 				}
 			}
 		}
