@@ -74,11 +74,15 @@ async function testMultiTurn(model) {
 }
 
 // ---------- 测试 2：多轮工具调用（agent 循环） ----------
+// 用「读文件 + 执行命令」这类模型无法凭自身知识回答的任务。
+// 天气问题不合适：模型自带实时天气数据，会直接作答而不调工具
+// （实测 pro 在 temperature 0.8/0.3/0.1 下都出现过），那测的是模型偏好
+// 而不是网关的工具链路。
 async function testToolLoop(model) {
   console.log(`\n=== [${model}] 多轮工具调用 ===`);
   const messages = [
     { role: 'system', content: 'You are an agent. Use the provided tools when needed. After receiving tool results, answer the user.' },
-    { role: 'user', content: '北京现在天气怎么样？用 get_weather 工具查一下。' },
+    { role: 'user', content: '用 read_file 工具读一下 /etc/hostname，告诉我里面的内容。' },
   ];
   let toolRounds = 0;
   for (let step = 0; step < 4; step++) {
@@ -98,7 +102,7 @@ async function testToolLoop(model) {
           const args = JSON.parse(tc.function.arguments || '{}');
           if (tc.function.name === 'get_weather') result = JSON.stringify({ city: args.city || '北京', temp: '18°C', condition: '晴' });
           else if (tc.function.name === 'calc') result = String(eval(args.expr || '0'));
-          else if (tc.function.name === 'read_file') result = 'file content';
+          else if (tc.function.name === 'read_file') result = `file_path: ${args.path || '/etc/hostname'}\n<content>\nbuild-runner-07\n</content>`;
         } catch { result = 'ok'; }
         messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
       }
