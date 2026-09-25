@@ -21,7 +21,9 @@ func buildToolPrompt(tools []adapter.OpenAITool) string {
 	sb.WriteString("Do not answer from memory when a tool can provide the answer.\n\n")
 	for _, tool := range tools {
 		name := tool.Function.Name
-		desc := tool.Function.Description
+		// 描述压成单行：工具描述常含多行 Markdown 列表，换行会让 "- " 条目在模型
+		// 眼里变成同级的新工具，后面的 Parameters 行也会被吸附到描述末尾
+		desc := strings.Join(strings.Fields(tool.Function.Description), " ")
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 		if tool.Function.Parameters != nil {
 			if params, ok := tool.Function.Parameters.(map[string]interface{}); ok {
