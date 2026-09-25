@@ -64,12 +64,13 @@ func (s *Store) load() {
 	}
 }
 
-func (s *Store) saveLocked() {
-	if s.path == "" {
-		return
-	}
-	// 只保留最近 50 个会话，防文件无限膨胀
-	if len(s.convs) > 50 {
+// maxConversations 保留的会话数上限
+const maxConversations = 50
+
+// pruneLocked 淘汰最久未使用的会话。
+// 必须与持久化解耦：默认（无 path）时也要执行，否则内存里的会话表会随请求无限增长。
+func (s *Store) pruneLocked() {
+	for len(s.convs) > maxConversations {
 		var oldestKey string
 		var oldest int64 = 1<<62
 		for k, v := range s.convs {
@@ -79,6 +80,13 @@ func (s *Store) saveLocked() {
 			}
 		}
 		delete(s.convs, oldestKey)
+	}
+}
+
+func (s *Store) saveLocked() {
+	s.pruneLocked()
+	if s.path == "" {
+		return
 	}
 	data, err := json.MarshalIndent(s.convs, "", "  ")
 	if err != nil {
