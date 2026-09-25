@@ -183,31 +183,87 @@ func serializeRoleTexts(rts []roleText, maxChars int, extraSystem ...string) str
 		sysStr = "[System Instruction]\n" + strings.Join(system, "\n\n")
 	}
 
-	// 历史段：rest 去掉最后一条（当前消息）
-	var histStr, queryStr string
-	if len(rest) > 0 {
-		queryStr = "[Current Query]\n" + formatRoleText(rest[len(rest)-1])
-		if len(rest) > 1 {
-			var hs []string
-			for _, m := range rest[:len(rest)-1] {
-				hs = append(hs, formatRoleText(m))
+	// 分段：历史 / 本轮上下文 / 本轮提问
+	//
+	// agent 客户端（DSH 等）本轮的消息顺序是【用户提问在前、注入上下文在后】：
+	//   [user: 你好] [user: <system-reminder>AGENTS.md…] [user: Current runtime context…] [user: 技能目录]
+	// 若把最后一条当 Current Query，模型会把技能目录当成任务——2026-09 实测：
+	// 用户只说"你好"，模型却去写一个 quiz runner 脚本（12K 字符的工具调用）。
+	// 正确口径：本轮 = 最后一个 assistant 之后的消息；本轮第一条 user 消息才是提问，
+	// 其余（注入上下文）作为 Context 放在提问之前。
+	lastAssistant := -1
+	for i := len(rest) - 1; i >= 0; i-- {
+		if rest[i][0] == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	history := rest[:lastAssistant+1]
+	turn := rest[lastAssistant+1:]
+
+	var queryMsg *roleText
+	var ctxMsgs []roleText
+	if len(turn) > 0 && (turn[0][0] == "tool" || turn[0][0] == "function") {
+		// 工具结果轮：工具输出是本轮主体，后续消息作为附加上下文
+		queryMsg = &turn[0]
+		ctxMsgs = turn[1:]
+	} else {
+		for i := range turn {
+			if turn[i][0] == "user" && strings.TrimSpace(turn[i][1]) != "" {
+				queryMsg = &turn[i]
+				ctxMsgs = append(append([]roleText{}, turn[:i]...), turn[i+1:]...)
+				break
 			}
-			histStr = "[Conversation History]\n" + strings.Join(hs, "\n\n")
+		}
+		if queryMsg == nil && len(turn) > 0 {
+			// 本轮没有 user 消息（异常形态）：退化为取最后一条
+			queryMsg = &turn[len(turn)-1]
+			ctxMsgs = turn[:len(turn)-1]
+		}
+		if queryMsg == nil && len(rest) > 0 {
+			// 本轮为空（客户端只发了历史、没带新消息）：退化为把最后一条当提问
+			queryMsg = &rest[len(rest)-1]
+			history = rest[:len(rest)-1]
+			ctxMsgs = nil
 		}
 	}
 
-	// 组装 + 长度预算截断（优先保 system 与 Current Query，丢老历史）
-	var body string
-	if histStr != "" {
-		body = histStr + "\n\n" + queryStr
-	} else {
-		body = queryStr
+	var histStr, ctxStr, queryStr string
+	if len(history) > 0 {
+		hs := make([]string, 0, len(history))
+		for _, m := range history {
+			hs = append(hs, formatRoleText(m))
+		}
+		histStr = "[Conversation History]\n" + strings.Join(hs, "\n\n")
 	}
-	if sysStr != "" {
-		body = sysStr + "\n\n" + body
+	if len(ctxMsgs) > 0 {
+		cs := make([]string, 0, len(ctxMsgs))
+		for _, m := range ctxMsgs {
+			cs = append(cs, formatRoleText(m))
+		}
+		ctxStr = "[Context]\n" + strings.Join(cs, "\n\n")
+	}
+	if queryMsg != nil {
+		queryStr = "[Current Query]\n" + formatRoleText(*queryMsg)
 	}
 
-	// 超限：从历史段头部截（保留 Current Query 完整）
+	// 组装：system → 历史 → 上下文 → 提问（提问放最后，模型对末尾注意力最强）
+	parts := make([]string, 0, 4)
+	if sysStr != "" {
+		parts = append(parts, sysStr)
+	}
+	if histStr != "" {
+		parts = append(parts, histStr)
+	}
+	if ctxStr != "" {
+		parts = append(parts, ctxStr)
+	}
+	if queryStr != "" {
+		parts = append(parts, queryStr)
+	}
+	body := strings.Join(parts, "\n\n")
+
+	// 超限：丢历史与上下文（保留 system 与 Current Query 完整）
 	if utf8.RuneCountInString(body) > maxChars {
 		sysPart := ""
 		if sysStr != "" {
