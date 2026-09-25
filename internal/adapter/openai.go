@@ -43,6 +43,8 @@ type OpenAIMessage struct {
 
 // OpenAIToolCall 是 OpenAI 格式的工具调用
 type OpenAIToolCall struct {
+	// Index 仅流式响应使用：客户端按它把分片的工具调用拼回完整调用
+	Index    *int               `json:"index,omitempty"`
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
 	Function OpenAIToolCallFunc `json:"function"`
@@ -97,39 +99,63 @@ type OpenAIStreamChunk struct {
 }
 
 
-// MakeOpenAIStreamChunk 创建流式内容块（finish=true 时为收尾块）
-func MakeOpenAIStreamChunk(model, content string, finish bool) []byte {
-	return MakeOpenAIStreamChunkWithUsage(model, content, finish, nil)
+// NewStreamID 生成流式响应 id。
+// OpenAI 规范要求同一个流的全部 chunk 共用同一个 id（客户端据此归组）。
+func NewStreamID() string {
+	return fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:8])
 }
 
-// MakeOpenAIStreamChunkWithUsage 创建流式内容块，可在收尾块携带 usage
-// （OpenAI 规范：stream_options.include_usage 时最后一个 chunk 带 usage 且 choices 为空数组；
-// 实践中客户端普遍兼容"收尾块带 usage"的写法）
-func MakeOpenAIStreamChunkWithUsage(model, content string, finish bool, usage *OpenAIUsage) []byte {
-	now := time.Now().Unix()
-	chunk := OpenAIStreamChunk{
-		ID:      fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:8]),
+func marshalChunk(id, model string, choices []OpenAIChoice, usage *OpenAIUsage) []byte {
+	data, _ := json.Marshal(OpenAIStreamChunk{
+		ID:      id,
 		Object:  "chat.completion.chunk",
-		Created: now,
+		Created: time.Now().Unix(),
 		Model:   model,
-		Choices: []OpenAIChoice{
-			{
-				Index: 0,
-				Delta: &OpenAIDelta{},
-			},
-		},
-	}
-
-	if finish {
-		fr := "stop"
-		chunk.Choices[0].FinishReason = &fr
-	} else {
-		chunk.Choices[0].Delta.Content = content
-	}
-	chunk.Usage = usage
-
-	data, _ := json.Marshal(chunk)
+		Choices: choices,
+		Usage:   usage,
+	})
 	return data
+}
+
+// MakeOpenAIStreamContentChunk 内容增量块
+func MakeOpenAIStreamContentChunk(id, model, content string) []byte {
+	return marshalChunk(id, model, []OpenAIChoice{
+		{Index: 0, Delta: &OpenAIDelta{Content: content}},
+	}, nil)
+}
+
+// MakeOpenAIStreamFinishChunk 收尾块（finish_reason=stop）
+func MakeOpenAIStreamFinishChunk(id, model string) []byte {
+	fr := "stop"
+	return marshalChunk(id, model, []OpenAIChoice{
+		{Index: 0, Delta: &OpenAIDelta{}, FinishReason: &fr},
+	}, nil)
+}
+
+// MakeOpenAIStreamToolCallChunk 工具调用块（finish_reason=tool_calls）。
+// 每个调用带 index：OpenAI 规范要求流式工具调用分片用 index 归组，
+// 缺了它客户端无法把分片拼回完整调用。
+func MakeOpenAIStreamToolCallChunk(id, model string, toolCalls []OpenAIToolCall) []byte {
+	indexed := make([]OpenAIToolCall, len(toolCalls))
+	for i, tc := range toolCalls {
+		idx := i
+		tc.Index = &idx
+		indexed[i] = tc
+	}
+	fr := "tool_calls"
+	return marshalChunk(id, model, []OpenAIChoice{
+		{Index: 0, Delta: &OpenAIDelta{ToolCalls: indexed}, FinishReason: &fr},
+	}, nil)
+}
+
+// MakeOpenAIStreamUsageChunk 独立的 usage 块。
+//
+// OpenAI 规范：stream_options.include_usage 时最后一个 chunk 携带 usage 且
+// choices 为空数组。此前实现复用了收尾块（choices[0].finish_reason="stop"），
+// 会在工具调用块之后把 finish_reason 覆盖成 stop，客户端因此认为模型正常结束
+// 而不去执行工具调用——直接打断 agent 的工具循环（2026-09 审查发现）。
+func MakeOpenAIStreamUsageChunk(id, model string, usage *OpenAIUsage) []byte {
+	return marshalChunk(id, model, []OpenAIChoice{}, usage)
 }
 
 // MakeOpenAIResponse 创建 OpenAI 非流式响应
@@ -166,29 +192,6 @@ func MakeOpenAIResponseWithUsage(model, content string, usage *OpenAIUsage) []by
 type OpenAIModelsResponse struct {
 	Object string      `json:"object"`
 	Data   interface{} `json:"data"`
-}
-
-// MakeOpenAIStreamToolCallChunk 创建流式工具调用块
-func MakeOpenAIStreamToolCallChunk(model string, toolCalls []OpenAIToolCall, finish bool) []byte {
-	now := time.Now().Unix()
-	chunk := OpenAIStreamChunk{
-		ID:      fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:8]),
-		Object:  "chat.completion.chunk",
-		Created: now,
-		Model:   model,
-		Choices: []OpenAIChoice{
-			{
-				Index: 0,
-				Delta: &OpenAIDelta{ToolCalls: toolCalls},
-			},
-		},
-	}
-	if finish {
-		fr := "tool_calls"
-		chunk.Choices[0].FinishReason = &fr
-	}
-	data, _ := json.Marshal(chunk)
-	return data
 }
 
 // MakeOpenAIToolCallResponse 创建 OpenAI 非流式工具调用响应

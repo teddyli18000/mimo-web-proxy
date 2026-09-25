@@ -314,11 +314,10 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 			if stream {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
-				toolChunk := adapter.MakeOpenAIStreamToolCallChunk(model, toolCalls, true)
-				fmt.Fprintf(w, "data: %s\n\n", toolChunk)
+				streamID := adapter.NewStreamID()
+				fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamToolCallChunk(streamID, model, toolCalls))
 				if openaiUsage != nil {
-					usageChunk := adapter.MakeOpenAIStreamChunkWithUsage(model, "", true, openaiUsage)
-					fmt.Fprintf(w, "data: %s\n\n", usageChunk)
+					fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamUsageChunk(streamID, model, openaiUsage))
 				}
 				fmt.Fprintf(w, "data: [DONE]\n\n")
 				if f, ok := w.(http.Flusher); ok {
@@ -345,12 +344,12 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	if stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		contentChunk := adapter.MakeOpenAIStreamChunk(model, result.Text, false)
-		fmt.Fprintf(w, "data: %s\n\n", contentChunk)
-
-		usageChunk := adapter.MakeOpenAIStreamChunkWithUsage(model, "", true, openaiUsage)
-		fmt.Fprintf(w, "data: %s\n\n", usageChunk)
-
+		streamID := adapter.NewStreamID()
+		fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamContentChunk(streamID, model, result.Text))
+		fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamFinishChunk(streamID, model))
+		if openaiUsage != nil {
+			fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamUsageChunk(streamID, model, openaiUsage))
+		}
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
