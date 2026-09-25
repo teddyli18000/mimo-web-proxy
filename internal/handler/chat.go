@@ -199,7 +199,18 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	//   新会话 → 完整上下文（system + 历史 + 当前消息）+ 完整工具 schema
 	//   延续会话 → 仅增量消息（上游服务端已有上下文）+ 紧凑工具名提醒
 	// 增量发送与网页端原生行为一致：缩短 query、避免长度限制、降低每轮开销。
+	//
+	// 工具结果轮（本轮没有新的用户提问）必须带上任务锚点：只发工具输出时模型会
+	// 丢失任务（2026-09 DSH 实测，模型自述"只收到工具输出、没有原始指令"）。
 	budget := router.MaxQueryCharsForModel(model)
+	turnQuestion := currentTurnQuestion(req.Messages)
+	if turnQuestion != "" {
+		h.convStore.SetTask(convID, turnQuestion)
+	}
+	taskAnchor := h.convStore.Task(convID)
+	// 工具结果轮（本轮没有新提问）需要把任务锚点带回去
+	useAnchor := !isNew && turnQuestion == "" && taskAnchor != ""
+
 	buildQuery := func(full bool) string {
 		msgs := req.Messages
 		if !full {
@@ -213,6 +224,9 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 				extra = append(extra, r)
 			}
 		}
+		if !full && useAnchor {
+			extra = append(extra, "Current task (the user's request you are working on): "+taskAnchor)
+		}
 		return serializeMessages(msgs, budget, extra...)
 	}
 
@@ -225,7 +239,12 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		writeError(w, http.StatusBadRequest, "no valid user message")
 		return
 	}
-	log.Printf("[query] len=%d budget=%d mode=%s", len(query), budget, map[bool]string{true: "full", false: "delta"}[isNew])
+	anchorNote := ""
+	if useAnchor {
+		anchorNote = fmt.Sprintf(" anchor=%d", len(taskAnchor))
+	}
+	log.Printf("[query] len=%d budget=%d mode=%s%s", len(query), budget,
+		map[bool]string{true: "full", false: "delta"}[isNew], anchorNote)
 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()

@@ -30,6 +30,7 @@ type convState struct {
 	ParentID    string // last AI response message ID from MiMo SSE
 	Fingerprint string // fingerprint of last client message list
 	MsgCount    int    // 上一轮客户端非 system 消息数（用于判断"是否增长"）
+	Task        string // 当前任务锚点（用户最近的提问，工具结果轮要带上）
 	UpdatedAt   int64  // unix seconds, 用于 LRU 淘汰
 }
 
@@ -222,6 +223,32 @@ func (s *Store) ParentID(convID string) string {
 	defer s.mu.RUnlock()
 	if cs, ok := s.convs[convID]; ok {
 		return cs.ParentID
+	}
+	return ""
+}
+
+// SetTask 记录会话当前的任务锚点（用户最近的提问）。
+// 工具结果轮只发工具输出，模型容易丢失任务上下文（2026-09 DSH 实测：
+// 模型自述"只收到工具输出、没有原始指令"），因此需要把锚点带回去。
+func (s *Store) SetTask(convID, task string) {
+	if task == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cs, ok := s.convs[convID]; ok {
+		cs.Task = truncateUTF8(task, 500)
+		cs.UpdatedAt = nowUnix()
+		s.saveLocked()
+	}
+}
+
+// Task 读取会话的任务锚点
+func (s *Store) Task(convID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if cs, ok := s.convs[convID]; ok {
+		return cs.Task
 	}
 	return ""
 }

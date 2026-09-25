@@ -102,6 +102,45 @@ func serializeMessages(msgs []adapter.OpenAIMessage, maxChars int, extraSystem .
 	return serializeRoleTexts(toRoleTexts(msgs), maxChars, extraSystem...)
 }
 
+// currentTurnQuestion 返回本轮的用户提问。
+//
+// 本轮 = 最后一个 assistant 消息之后的部分。在其中找第一条"像提问"的 user 消息：
+// agent 客户端把用户提问放在本轮靠前、注入上下文跟在后面，但工具结果轮可能在其后
+// 追加新指令（[tool, tool, user("改一下")]），注入也可能排在提问之前，因此必须遍历
+// 而不是只看第一条。全部命中注入特征时返回空串（说明本轮没有新提问）。
+func currentTurnQuestion(msgs []adapter.OpenAIMessage) string {
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	for _, m := range msgs[lastAssistant+1:] {
+		if m.Role != "user" {
+			continue
+		}
+		if q := strings.TrimSpace(openAIMessageText(m)); q != "" && !looksLikeInjectedContext(q) {
+			return q
+		}
+	}
+	return ""
+}
+
+// looksLikeInjectedContext 粗判一段文本是否为客户端注入的上下文而非用户提问。
+// 覆盖 DSH 的 <system-reminder> / runtime context 形态；命中时宁可不记锚点，
+// 也好过把注入内容当成任务。
+func looksLikeInjectedContext(s string) bool {
+	head := s
+	if len(head) > 200 {
+		head = head[:200]
+	}
+	head = strings.TrimSpace(head)
+	return strings.HasPrefix(head, "<system-reminder>") ||
+		strings.HasPrefix(head, "Current runtime context") ||
+		strings.HasPrefix(head, "Current DSH")
+}
+
 // DeltaMessages 返回本轮新增的消息（最后一个 assistant 消息之后的部分）。
 //
 // agent 客户端（DSH/Cline 等）每轮都会重发完整历史，而上游 MiMo 服务端已保有
@@ -263,29 +302,46 @@ func serializeRoleTexts(rts []roleText, maxChars int, extraSystem ...string) str
 	}
 	body := strings.Join(parts, "\n\n")
 
-	// 超限：丢历史与上下文（保留 system 与 Current Query 完整）
+	// 超限：丢历史与上下文，优先保 Current Query 与 system。
+	// system 自身超预算（工具 schema 过大）时必须截断它，否则 body 会突破上游
+	// 硬上限被直接拒绝——先保提问，再保 system，最后兜底硬截断。
 	if utf8.RuneCountInString(body) > maxChars {
-		sysPart := ""
-		if sysStr != "" {
-			sysPart = sysStr + "\n\n"
+		const notice = "\n\n[Conversation History]\n...(truncated, history too long)\n\n"
+		room := maxChars - utf8.RuneCountInString(queryStr) - utf8.RuneCountInString(notice)
+		if room < 0 {
+			room = 0
 		}
-		budget := maxChars - utf8.RuneCountInString(sysPart) - 40
-		if budget < 2000 {
-			budget = 2000
-		}
-		q := "[Conversation History]\n...(truncated, history too long)\n\n" + queryStr
-		if utf8.RuneCountInString(q) > budget {
-			rq := []rune(queryStr)
-			if len(rq) > budget {
-				q = string(rq[len(rq)-budget:])
-			}
-			body = sysPart + q
-		} else {
-			body = sysPart + q
+		body = truncateHead(sysStr, room) + notice + queryStr
+		if utf8.RuneCountInString(body) > maxChars {
+			body = truncateTail(body, maxChars)
 		}
 	}
 
 	return strings.TrimSpace(body)
+}
+
+// truncateHead 保留前 n 个字符（按 rune 切，避免截断多字节字符）
+func truncateHead(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// truncateTail 保留后 n 个字符
+func truncateTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
 }
 
 // formatRoleText 渲染单条消息为历史行
