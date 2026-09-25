@@ -18,8 +18,8 @@ A local gateway that reverse-proxies [aistudio.xiaomimimo.com](https://aistudio.
 
 **Quick start**
 
-1. Download `mimo-web-proxy.exe` from [Releases](https://github.com/teddyli18000/mimo-web-proxy/releases) — that single file is all you need.
-2. Double-click it. On first run it creates `config.json` and `data/` next to itself and opens the panel at `http://localhost:8080`.
+1. Download the build for your platform from [Releases](https://github.com/teddyli18000/mimo-web-proxy/releases) — Windows `.zip`, macOS `.dmg`, or Linux `.tar.gz`.
+2. Run it. On first start it creates `config.json` and `data/`, then opens the panel at `http://localhost:8080`.
 3. Paste your MiMo cookie into the panel (see [获取 MiMo Cookie](#获取-mimo-cookie)), save.
 4. Point your client at `http://localhost:8080/v1` with API key `sk-mimo`.
 
@@ -37,20 +37,40 @@ A local gateway that reverse-proxies [aistudio.xiaomimimo.com](https://aistudio.
 
 ## 快速开始
 
-### 只下一个 exe 就够了
+### 下载即用（三平台）
 
-从 [Releases](https://github.com/teddyli18000/mimo-web-proxy/releases) 下载 **`mimo-web-proxy.exe`**（或整个 zip，内容一样），放到任意目录，**双击运行**。
+从 [Releases](https://github.com/teddyli18000/mimo-web-proxy/releases) 下载对应平台的文件：
 
-不需要安装、不需要 Node、不需要 Go、不需要预先建配置文件。首次启动时程序会在 exe 同目录**自动创建**：
+| 平台 | 文件 | 运行方式 |
+|---|---|---|
+| **Windows 10/11 (x64)** | `mimo-web-proxy-windows-amd64.zip` | 解压后双击 `mimo-web-proxy.exe` |
+| **macOS (Apple Silicon)** | `mimo-web-proxy-macos-arm64.dmg` | 打开 dmg，把 App 拖进「应用程序」，双击运行 |
+| **macOS (Intel)** | `mimo-web-proxy-macos-amd64.dmg` | 同上 |
+| **Linux (x64)** | `mimo-web-proxy-linux-amd64.tar.gz` | 解压后 `chmod +x mimo-web-proxy && ./mimo-web-proxy` |
 
-| 自动创建 | 说明 |
+程序是**自包含**的：不需要安装、不需要 Node、不需要 Go、不需要预先建配置文件。首次启动自动创建 `config.json` 与 `data/`，并打开面板 `http://localhost:8080`。
+
+**配置与数据位置**（首次启动自动创建）：
+
+| 平台 | 位置 |
 |---|---|
-| `config.json` | 默认配置（端口 `8080`、API Key `sk-mimo`、默认模型 `mimo-v2.6-pro`） |
-| `data/` | 用量统计与会话映射（`stats.json`、`conversations.json`） |
-
-启动后浏览器自动打开管理面板 `http://localhost:8080`，按 [获取 Cookie](#获取-mimo-cookie) 填入账号即可使用。
+| Windows | exe 同目录 |
+| macOS | `~/Library/Application Support/mimo-web-proxy/`（`.app` 内不写文件，避免破坏签名） |
+| Linux | 二进制同目录 |
 
 > 💡 想换端口或 API Key？改面板「配置」页保存，或直接编辑 `config.json`。想禁止自动开浏览器，设环境变量 `NO_BROWSER_OPEN=1`。
+
+### macOS 首次打开被拦截？
+
+本版本未做代码签名与公证（需要 Apple 开发者账号），Gatekeeper 会提示"无法验证开发者"。**右键点击 App → 打开 → 在弹窗里再点"打开"**，或执行一次：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/MiMo Web Proxy.app"
+```
+
+### Linux 依赖
+
+需要 glibc 的发行版（Debian/Ubuntu/Fedora/Arch 均可）。纯静态二进制，无运行时依赖。若系统无桌面环境，设 `NO_BROWSER_OPEN=1` 后手动访问面板。
 
 ### 从源码编译
 
@@ -58,17 +78,29 @@ A local gateway that reverse-proxies [aistudio.xiaomimimo.com](https://aistudio.
 git clone https://github.com/teddyli18000/mimo-web-proxy.git
 cd mimo-web-proxy
 
-# 编译前端（Node 18+）
+# 编译前端（Node 18+）—— static/ 未入库，必须先构建
 cd web && npm install && npm run build && cd ..
 
 # 编译后端（Go 1.22+）
-go build -o mimo-web-proxy.exe .
+go build -o mimo-web-proxy.exe .     # Windows
+go build -o mimo-web-proxy .         # macOS / Linux
+
+# 交叉编译示例
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mimo-web-proxy-mac .
 ```
 
 ### Docker
 
 ```bash
 docker compose up -d
+```
+
+### 自动构建
+
+打 tag 即触发 [GitHub Actions](.github/workflows/release.yml)：三平台并行构建 → 发布 pre-release。
+
+```bash
+git tag v1.3.3 && git push origin v1.3.3
 ```
 
 ## 获取 MiMo Cookie

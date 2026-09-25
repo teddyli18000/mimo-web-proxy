@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,11 +28,7 @@ import (
 var staticFiles embed.FS
 
 func main() {
-	// 数据/配置目录跟随 exe 所在目录，保证双击运行时文件不散落
-	baseDir := "."
-	if exe, err := os.Executable(); err == nil {
-		baseDir = filepath.Dir(exe)
-	}
+	baseDir := resolveBaseDir()
 
 	configPath := filepath.Join(baseDir, "config.json")
 	if p := os.Getenv("CONFIG_PATH"); p != "" {
@@ -145,6 +142,29 @@ func main() {
 		fmt.Scanln()
 		os.Exit(1)
 	}
+}
+
+// resolveBaseDir 决定 config.json 与 data/ 的落盘位置。
+//
+// 默认跟随可执行文件所在目录（双击/直接运行时不散落文件）。
+// 例外：macOS 的 .app bundle 里 exe 位于 Foo.app/Contents/MacOS/，
+// 往 bundle 内写配置会破坏代码签名、装到 /Applications 时可能无写权限、
+// 升级即丢配置，因此改用 ~/Library/Application Support/mimo-web-proxy。
+func resolveBaseDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	dir := filepath.Dir(exe)
+	if runtime.GOOS == "darwin" && strings.Contains(exe, ".app/Contents/MacOS/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			appDir := filepath.Join(home, "Library", "Application Support", "mimo-web-proxy")
+			if err := os.MkdirAll(appDir, 0755); err == nil {
+				return appDir
+			}
+		}
+	}
+	return dir
 }
 
 // openBrowser 用系统默认浏览器打开面板
