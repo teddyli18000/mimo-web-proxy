@@ -195,19 +195,37 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		log.Printf("[conv] continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
-	// 全量重放组装 query（serialize 会合并 system、渲染历史、高亮当前消息）。
-	// 工具定义计入 query 长度预算（各通道上限不同，见 router.MaxQueryCharsForModel）
-	var extraSys []string
-	if len(req.Tools) > 0 {
-		extraSys = append(extraSys, buildToolPrompt(req.Tools))
+	// query 组装策略：
+	//   新会话 → 完整上下文（system + 历史 + 当前消息）+ 完整工具 schema
+	//   延续会话 → 仅增量消息（上游服务端已有上下文）+ 紧凑工具名提醒
+	// 增量发送与网页端原生行为一致：缩短 query、避免长度限制、降低每轮开销。
+	budget := router.MaxQueryCharsForModel(model)
+	buildQuery := func(full bool) string {
+		msgs := req.Messages
+		if !full {
+			msgs = DeltaMessages(req.Messages)
+		}
+		var extra []string
+		if len(req.Tools) > 0 {
+			if full {
+				extra = append(extra, buildToolPrompt(req.Tools))
+			} else if r := buildToolReminder(req.Tools); r != "" {
+				extra = append(extra, r)
+			}
+		}
+		return serializeMessages(msgs, budget, extra...)
 	}
-	query := serializeMessages(req.Messages, router.MaxQueryCharsForModel(model), extraSys...)
+
+	query := buildQuery(isNew)
+	if query == "" {
+		query = buildQuery(true) // 增量异常时退化为全量
+	}
 	if query == "" {
 		log.Printf("[filter] no valid user message")
 		writeError(w, http.StatusBadRequest, "no valid user message")
 		return
 	}
-	log.Printf("[query] len=%d (budget=%d)", len(query), router.MaxQueryCharsForModel(model))
+	log.Printf("[query] len=%d budget=%d mode=%s", len(query), budget, map[bool]string{true: "full", false: "delta"}[isNew])
 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
@@ -232,12 +250,14 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 			return
 		}
 
-		// 空响应重试：首次尝试若为空且无明确错误，换全新 conversationId 重试一次
+		// 空响应重试：首次尝试若为空且无明确错误，换全新 conversationId 重试一次。
+		// 重试必须改用【完整上下文】——新会话没有服务端历史，只发增量会答非所问。
 		if isWebResultEmpty(result) {
 			if attempt == 0 {
-				log.Printf("[retry] empty response on convID=%s, retrying with new convID...", curConvID[:min(len(curConvID), 8)])
+				log.Printf("[retry] empty response on convID=%s, retrying with full context", curConvID[:min(len(curConvID), 8)])
 				curConvID = randomHex32()
 				curParentID = "0"
+				query = buildQuery(true)
 				continue
 			}
 			log.Printf("[error] mimo returned an empty response after retry")
@@ -446,19 +466,36 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[conv] Anthropic continuing conversation %s (parentID=%s)", convID[:8], parentID[:min(len(parentID), 8)])
 	}
 
-	// 全量重放组装 query
+	// query 组装：新会话完整上下文 + 完整工具 schema；延续会话仅增量 + 紧凑工具名提醒
 	hasTools := len(req.Tools) > 0
-	var extraSysA []string
-	if hasTools {
-		extraSysA = append(extraSysA, buildToolPrompt(adapter.ConvertAnthropicToolsToOpenAI(req.Tools)))
+	budgetA := router.MaxQueryCharsForModel(routeResult.Model)
+	buildQueryA := func(full bool) string {
+		msgs := req.Messages
+		if !full {
+			msgs = DeltaMessagesAnthropic(req.Messages)
+		}
+		var extra []string
+		if hasTools {
+			openaiTools := adapter.ConvertAnthropicToolsToOpenAI(req.Tools)
+			if full {
+				extra = append(extra, buildToolPrompt(openaiTools))
+			} else if r := buildToolReminder(openaiTools); r != "" {
+				extra = append(extra, r)
+			}
+		}
+		return serializeMessagesAnthropic(msgs, req.System, budgetA, extra...)
 	}
-	query := serializeMessagesAnthropic(req.Messages, req.System, router.MaxQueryCharsForModel(routeResult.Model), extraSysA...)
+	query := buildQueryA(isNew)
+	if query == "" {
+		query = buildQueryA(true)
+	}
 	if query == "" {
 		log.Printf("[filter] no valid Anthropic user message")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "no valid user message"})
 		return
 	}
+	log.Printf("[query] Anthropic len=%d budget=%d mode=%s", len(query), budgetA, map[bool]string{true: "full", false: "delta"}[isNew])
 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
@@ -503,6 +540,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 记录 usage
+	inTokens, outTokens := 0, 0
 	if u := result.Usage; u != nil {
 		cached := 0
 		reasoning := 0
@@ -515,6 +553,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		stats.Get().Record(routeResult.Model, u.PromptTokens, u.CompletionTokens, cached, reasoning, u.TotalTokens)
+		inTokens = u.PromptTokens
+		outTokens = u.CompletionTokens
 	}
 
 	// 保存对话到 MiMo 官网历史记录 + 更新 parentId（仅在有实际内容时）
@@ -537,14 +577,18 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 				flusher, _ := w.(http.Flusher)
 
-				// Send message_start event
+				// Send message_start event（Anthropic 协议要求含 content/stop_reason/usage）
 				startMsg := map[string]interface{}{
 					"type": "message_start",
 					"message": map[string]interface{}{
-						"id":    fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
-						"type":  "message",
-						"role":  "assistant",
-						"model": routeResult.Model,
+						"id":            fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
+						"type":          "message",
+						"role":          "assistant",
+						"model":         routeResult.Model,
+						"content":       []interface{}{},
+						"stop_reason":   nil,
+						"stop_sequence": nil,
+						"usage":         map[string]interface{}{"input_tokens": inTokens, "output_tokens": 0},
 					},
 				}
 				fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_start", startMsg))
@@ -572,8 +616,12 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIdx}))
 				}
 				fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_delta", map[string]interface{}{
-					"type":        "message_delta",
-					"stop_reason": "tool_use",
+					"type": "message_delta",
+					"delta": map[string]interface{}{
+						"stop_reason":   "tool_use",
+						"stop_sequence": nil,
+					},
+					"usage": map[string]interface{}{"output_tokens": outTokens},
 				}))
 				fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_stop", nil))
 				if flusher != nil {
@@ -597,6 +645,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 					"content":     blocks,
 					"model":       routeResult.Model,
 					"stop_reason": "tool_use",
+					"usage":       map[string]interface{}{"input_tokens": inTokens, "output_tokens": outTokens},
 				}
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(resp)
@@ -611,14 +660,18 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 
-		// Send message_start event
+		// Send message_start event（Anthropic 协议要求含 content/stop_reason/usage）
 		startMsg := map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
-				"id":    fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
-				"type":  "message",
-				"role":  "assistant",
-				"model": routeResult.Model,
+				"id":            fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
+				"type":          "message",
+				"role":          "assistant",
+				"model":         routeResult.Model,
+				"content":       []interface{}{},
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage":         map[string]interface{}{"input_tokens": inTokens, "output_tokens": 0},
 			},
 		}
 		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_start", startMsg))
@@ -630,21 +683,28 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_start", textBlockStart))
 		if result.Text != "" {
-			delta := adapter.AnthropicTextDelta{Type: "text_delta", Text: result.Text}
-			fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_delta", delta))
+			fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]interface{}{"type": "text_delta", "text": result.Text},
+			}))
 		}
 		// Close text content block
 		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0}))
 		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_delta", map[string]interface{}{
-			"type":        "message_delta",
-			"stop_reason": "end_turn",
+			"type": "message_delta",
+			"delta": map[string]interface{}{
+				"stop_reason":   "end_turn",
+				"stop_sequence": nil,
+			},
+			"usage": map[string]interface{}{"output_tokens": outTokens},
 		}))
 		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_stop", nil))
 		if flusher != nil {
 			flusher.Flush()
 		}
 	} else {
-		resp := adapter.MakeAnthropicResponse(routeResult.Model, finalText)
+		resp := adapter.MakeAnthropicResponseWithUsage(routeResult.Model, finalText, inTokens, outTokens)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(resp)
 	}

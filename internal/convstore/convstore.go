@@ -29,6 +29,7 @@ type convState struct {
 	ConvID      string // 32-hex conversationId sent to MiMo
 	ParentID    string // last AI response message ID from MiMo SSE
 	Fingerprint string // fingerprint of last client message list
+	MsgCount    int    // 上一轮客户端非 system 消息数（用于判断"是否增长"）
 	UpdatedAt   int64  // unix seconds, 用于 LRU 淘汰
 }
 
@@ -151,13 +152,32 @@ func (s *Store) Resolve(msgs [][2]string) (convID, parentID string, isNew bool) 
 	defer s.mu.Unlock()
 
 	if fp != "" {
+		// 按最近使用时间倒序取第一个匹配：客户端重跑同一段内容时（测试重放、
+		// agent 重试、多个客户端用同样的系统提示），会存在多个指纹相同的会话，
+		// map 遍历顺序随机 → 可能复用到已推进或已过期的旧会话，导致模型丢上下文
+		// （2026-09 实测：多轮测试偶发答非所问）。必须命中最近那个。
+		//
+		// 同时要求消息数增长：客户端把同一份历史再发一次（重放）不算延续，
+		// 否则会把增量发给已经推进过的旧会话，模型只能看到半截对话。
+		non := countNonSystem(msgs)
+		var best *convState
 		for _, cs := range s.convs {
-			if cs.Fingerprint != "" && Continuation(msgs, cs.Fingerprint) {
-				cs.Fingerprint = fp
-				cs.UpdatedAt = nowUnix()
-				s.saveLocked()
-				return cs.ConvID, cs.ParentID, false
+			if cs.Fingerprint == "" || !Continuation(msgs, cs.Fingerprint) {
+				continue
 			}
+			if non <= cs.MsgCount {
+				continue
+			}
+			if best == nil || cs.UpdatedAt > best.UpdatedAt {
+				best = cs
+			}
+		}
+		if best != nil {
+			best.Fingerprint = fp
+			best.MsgCount = non
+			best.UpdatedAt = nowUnix()
+			s.saveLocked()
+			return best.ConvID, best.ParentID, false
 		}
 	}
 
@@ -167,10 +187,22 @@ func (s *Store) Resolve(msgs [][2]string) (convID, parentID string, isNew bool) 
 		ConvID:      convID,
 		ParentID:    "0",
 		Fingerprint: fp,
+		MsgCount:    countNonSystem(msgs),
 		UpdatedAt:   nowUnix(),
 	}
 	s.saveLocked()
 	return convID, "0", true
+}
+
+// countNonSystem 统计非 system/tool 消息数（与 Fingerprint 口径一致）
+func countNonSystem(msgs [][2]string) int {
+	n := 0
+	for _, m := range msgs {
+		if m[0] != "system" && m[0] != "tool" {
+			n++
+		}
+	}
+	return n
 }
 
 // SetParentID 更新指定会话的最后 AI 消息 ID

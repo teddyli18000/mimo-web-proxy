@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -120,11 +121,6 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 		MultiMedias: []interface{}{},
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
-	}
-
 	// 根据模型选择通道：ultraspeed 走 fastchat，其余走 open-apis
 	// （save 路径在 SaveConversation 里按同规则选择）
 	chatPath := chatAPI
@@ -136,9 +132,19 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 	// 上游 429（请求过于频繁）/5xx 时透明重试：
 	// agent 客户端（如 DSH）高频调用会触发限流，透传 429 会导致客户端
 	// 用自己的重试策略继续打同一通道、全线失败（2026-09 DSH 会话实测）。
-	// 指数退避 2s/4s/8s，最多 3 次重试；鉴权类错误（401/403）不重试。
-	const maxRetries = 3
+	// fastchat（ultraspeed）通道限流更严，429 给到 5 次、退避至 16s。
+	// 每次尝试都重新生成 msgId：上游按 msgId 去重，复用同一 msgId 重发会得到
+	// "请求已处理，请勿重复提交"（参考 Fu-Jie/mimo-free-api-mcp 的重试实现）。
+	const maxRetries = 5
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			reqBody.MsgID = strings.ReplaceAll(uuid.New().String(), "-", "")
+		}
+		body, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("marshal: %w", err)
+		}
+
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
@@ -160,8 +166,13 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		if retryable && attempt < maxRetries {
-			backoff := time.Duration(2<<attempt) * time.Second // 2s, 4s, 8s
-			log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff)
+			// 2s, 4s, 8s, 16s, 16s（封顶 16s）；加 0~1s 抖动避免并发请求同步重试
+			secs := 1 << (attempt + 1)
+			if secs > 16 {
+				secs = 16
+			}
+			backoff := time.Duration(secs)*time.Second + time.Duration(rand.Int63n(1000))*time.Millisecond
+			log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff.Round(time.Millisecond))
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("mimo %d: %s (cancelled during retry backoff)", resp.StatusCode, string(errBody))

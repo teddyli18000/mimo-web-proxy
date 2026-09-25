@@ -102,6 +102,54 @@ func serializeMessages(msgs []adapter.OpenAIMessage, maxChars int, extraSystem .
 	return serializeRoleTexts(toRoleTexts(msgs), maxChars, extraSystem...)
 }
 
+// DeltaMessages 返回本轮新增的消息（最后一个 assistant 消息之后的部分）。
+//
+// agent 客户端（DSH/Cline 等）每轮都会重发完整历史，而上游 MiMo 服务端已保有
+// 此前对话上下文（conversationId + parentId 链）。延续会话时只发送增量：
+//   - 大幅缩短 query，避免触发上游长度限制（fastchat ≈48K / open-apis ≈100K）
+//   - 与网页端原生行为一致（网页端每轮也只发新消息）
+// 无 assistant 消息（首轮）或增量为空时返回原列表，退化为全量发送。
+func DeltaMessages(msgs []adapter.OpenAIMessage) []adapter.OpenAIMessage {
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 || lastAssistant+1 >= len(msgs) {
+		return msgs
+	}
+	tail := msgs[lastAssistant+1:]
+	for _, m := range tail {
+		if m.Role == "user" || m.Role == "tool" || m.Role == "function" {
+			return tail
+		}
+	}
+	return msgs
+}
+
+// DeltaMessagesAnthropic Anthropic 版增量
+func DeltaMessagesAnthropic(msgs []adapter.AnthropicMessage) []adapter.AnthropicMessage {
+	lastAssistant := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 || lastAssistant+1 >= len(msgs) {
+		return msgs
+	}
+	tail := msgs[lastAssistant+1:]
+	for _, m := range tail {
+		if m.Role == "user" {
+			return tail
+		}
+	}
+	return msgs
+}
+
 // serializeMessagesAnthropic Anthropic 版
 func serializeMessagesAnthropic(msgs []adapter.AnthropicMessage, system string, maxChars int, extraSystem ...string) string {
 	return serializeRoleTexts(toRoleTextsAnthropic(msgs, system), maxChars, extraSystem...)

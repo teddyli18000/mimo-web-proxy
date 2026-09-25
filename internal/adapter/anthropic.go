@@ -3,7 +3,6 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -90,17 +89,36 @@ func MakeAnthropicResponse(model, content string) []byte {
 	return data
 }
 
-// MakeAnthropicStreamEvent 创建 Anthropic 流式事件
+// MakeAnthropicResponseWithUsage 生成带 usage 的非流式响应
+func MakeAnthropicResponseWithUsage(model, content string, inTokens, outTokens int) []byte {
+	resp := AnthropicResponse{
+		ID:         fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
+		Type:       "message",
+		Role:       "assistant",
+		Content:    []AnthropicBlock{{Type: "text", Text: content}},
+		Model:      model,
+		StopReason: "end_turn",
+		Usage:      AnthropicUsage{InputTokens: inTokens, OutputTokens: outTokens},
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// MakeAnthropicStreamEvent 序列化 Anthropic 流式事件。
+//
+// Anthropic SSE 的 data 字段就是事件对象本身，不能再包一层信封：
+//
+//	event: content_block_delta
+//	data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
+//
+// 此前实现包了 {"type":..,"created":..,"data":{..}}，导致官方 SDK 读不到
+// delta（流式有事件但无文本），2026-09 用 @anthropic-ai/sdk 实测定位。
 func MakeAnthropicStreamEvent(eventType string, data interface{}) []byte {
-	now := time.Now().Unix()
-	event := map[string]interface{}{
-		"type":    eventType,
-		"created": now,
+	if data == nil {
+		b, _ := json.Marshal(map[string]interface{}{"type": eventType})
+		return b
 	}
-	if data != nil {
-		event["data"] = data
-	}
-	b, _ := json.Marshal(event)
+	b, _ := json.Marshal(data)
 	return b
 }
 
