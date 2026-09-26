@@ -113,9 +113,15 @@ type ModelConfig struct {
 // Chat 发起聊天，返回 SSE 流
 // conversationID: 客户端提供的对话 ID（32 位 hex），用于复用 MiMo 服务端上下文
 // parentID: 保留参数（当前协议请求体不需要，仅用于将来兼容）
-func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, parentID string, thinking bool) (io.ReadCloser, error) {
+func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, parentID string, thinking bool, medias []interface{}) (io.ReadCloser, error) {
 	if conversationID == "" {
 		conversationID = strings.ReplaceAll(uuid.New().String(), "-", "")
+	}
+
+	// 上游要求 multiMedias 必须是数组：传 nil 会序列化成 null 并被拒绝
+	// （"请求参数不合法,multiMedias不能为null"）
+	if medias == nil {
+		medias = []interface{}{}
 	}
 
 	reqBody := WebChatRequest{
@@ -130,7 +136,7 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 			Temperature:     0.8,
 			TopP:            0.95,
 		},
-		MultiMedias: []interface{}{},
+		MultiMedias: medias,
 	}
 
 	// 根据模型选择通道：ultraspeed 走 fastchat，其余走 open-apis

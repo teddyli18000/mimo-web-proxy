@@ -2,8 +2,6 @@ package router
 
 import (
 	"strings"
-
-	"github.com/teddyli18000/mimo-web-proxy/internal/mimo"
 )
 
 // 当前上游（aistudio.xiaomimimo.com/open-apis/bot/config）提供的模型，
@@ -19,33 +17,26 @@ const (
 // DefaultModel 纯文本默认模型
 const DefaultModel = ModelV26Pro
 
-// DefaultMultimodalModel 含图片/音频/文件时的默认模型
-const DefaultMultimodalModel = ModelV26Flash
-
 // RouteResult 路由决策结果
 type RouteResult struct {
 	Model  string // 实际要使用的模型
 	Reason string // 路由原因
 }
 
-// RouteModel 根据消息内容决定使用哪个模型
+// RouteModel 根据请求决定使用哪个模型
 // 规则：
 // 1. 用户显式指定模型 → 尊重
-// 2. 未指定（空/auto）→ 含多模态内容用 v2.6-flash，纯文本用配置的 default_model
+// 2. 未指定（空/auto）→ 用配置的 default_model，其次退回 DefaultModel
+//
+// 不再按"是否含图片"切换模型：v2.6 全系列都能识图（2026-09 实测三个模型
+// 均能正确识别图片内容），因带图而降级只会白白损失推理能力。
 //
 // fallback 来自 config.json 的 default_model（管理面板可改）；传空串时退回常量。
-func RouteModel(requestedModel string, messages []mimo.Message, fallback string) RouteResult {
+func RouteModel(requestedModel string, fallback string) RouteResult {
 	if requestedModel != "" && requestedModel != "auto" {
 		normalized := normalizeModel(requestedModel)
 		return RouteResult{Model: normalized, Reason: "explicit"}
 	}
-
-	for _, msg := range messages {
-		if hasMultimodalContent(msg.Content) {
-			return RouteResult{Model: DefaultMultimodalModel, Reason: "multimodal_content"}
-		}
-	}
-
 	if fallback != "" {
 		if normalized := normalizeModel(fallback); normalized != "" {
 			return RouteResult{Model: normalized, Reason: "configured_default"}
@@ -54,23 +45,6 @@ func RouteModel(requestedModel string, messages []mimo.Message, fallback string)
 	return RouteResult{Model: DefaultModel, Reason: "text_only"}
 }
 
-// hasMultimodalContent 检查内容是否包含非文本部分
-func hasMultimodalContent(content interface{}) bool {
-	switch v := content.(type) {
-	case string:
-		return false
-	case []interface{}:
-		for _, part := range v {
-			if m, ok := part.(map[string]interface{}); ok {
-				t, _ := m["type"].(string)
-				if t == "image_url" || t == "audio" || t == "file" || t == "image" {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
 
 // normalizeModel 标准化模型名称（含历史别名兼容）
 func normalizeModel(model string) string {

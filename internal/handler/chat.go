@@ -80,8 +80,8 @@ func randomHex32() string {
 	return hex.EncodeToString(b)
 }
 
-func collectWebResult(ctx context.Context, client *mimo.WebClient, query, model, convID, parentID string) (webResult, error) {
-	body, err := client.Chat(ctx, query, model, convID, parentID, false)
+func collectWebResult(ctx context.Context, client *mimo.WebClient, query, model, convID, parentID string, medias []interface{}) (webResult, error) {
+	body, err := client.Chat(ctx, query, model, convID, parentID, false, medias)
 	if err != nil {
 		return webResult{}, err
 	}
@@ -181,7 +181,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routeResult := router.RouteModel(req.Model, toMiMoMessages(req.Messages), config.Get().DefaultModel)
+	routeResult := router.RouteModel(req.Model, config.Get().DefaultModel)
 	log.Printf("[route] model=%s reason=%s", routeResult.Model, routeResult.Reason)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
@@ -273,6 +273,9 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
 
+	// 图片先传到上游资源接口，拿到 id 后随对话一起发（否则模型看不到图）
+	medias := uploadImages(ctx, client, collectImagesOpenAI(req.Messages))
+
 	curConvID := convID
 	curParentID := parentID
 	replacedFrom := "" // 非空表示空响应重试换过会话，成功后需迁移映射
@@ -280,7 +283,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 
 	for attempt := 0; attempt < 2; attempt++ {
 		var err error
-		result, err = collectWebResult(ctx, client, query, model, curConvID, curParentID)
+		result, err = collectWebResult(ctx, client, query, model, curConvID, curParentID, medias)
 		if err != nil {
 			log.Printf("[error] web chat (attempt %d): %v", attempt+1, err)
 			writeError(w, http.StatusBadGateway, fmt.Sprintf("mimo error: %v", err))
@@ -443,13 +446,6 @@ func filterThinkingChunk(content string, inThinking bool) (string, bool) {
 	return result.String(), inThinking
 }
 
-func toMiMoMessages(msgs []adapter.OpenAIMessage) []mimo.Message {
-	result := make([]mimo.Message, len(msgs))
-	for i, m := range msgs {
-		result[i] = mimo.Message{Role: m.Role, Content: m.Content}
-	}
-	return result
-}
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -517,7 +513,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routeResult := router.RouteModel(req.Model, nil, config.Get().DefaultModel)
+	routeResult := router.RouteModel(req.Model, config.Get().DefaultModel)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
@@ -594,6 +590,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	stats.Get().IncrConcurrency()
 	defer stats.Get().DecrConcurrency()
 
+	mediasA := uploadImages(ctx, client, collectImagesAnthropic(req.Messages))
+
 	curConvID := convID
 	curParentID := parentID
 	replacedFrom := "" // 非空表示空响应重试换过会话，成功后需迁移映射
@@ -601,7 +599,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	for attempt := 0; attempt < 2; attempt++ {
 		var err error
-		result, err = collectWebResult(ctx, client, query, routeResult.Model, curConvID, curParentID)
+		result, err = collectWebResult(ctx, client, query, routeResult.Model, curConvID, curParentID, mediasA)
 		if err != nil {
 			log.Printf("[error] Anthropic web chat (attempt %d): %v", attempt+1, err)
 			writeAnthropicError(w, http.StatusBadGateway, err.Error())
