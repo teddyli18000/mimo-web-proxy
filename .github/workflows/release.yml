@@ -174,46 +174,9 @@ jobs:
           files: artifacts/*
           fail_on_unmatched_files: true
           generate_release_notes: true
+          # release 正文只写版本信息：安装、配置、客户端接入都在 README 里，
+          # 在这里重复一遍只会跟文档一起腐烂。具体变更由维护者补充。
           body: |
-            > ⚠️ 预发布版本（pre-release）：功能可用但可能仍有问题，欢迎反馈。
+            Windows / macOS (arm64 · amd64) / Linux 三平台构建。
 
-            ## 下载
-
-            | 平台 | 文件 | 说明 |
-            |---|---|---|
-            | Windows 10/11 (x64) | `mimo-web-proxy-windows-amd64.zip` | 解压后双击 `mimo-web-proxy.exe` |
-            | macOS (Apple Silicon) | `mimo-web-proxy-macos-arm64.dmg` | M1/M2/M3/M4 |
-            | macOS (Intel) | `mimo-web-proxy-macos-amd64.dmg` | x86_64 |
-            | Linux (x64) | `mimo-web-proxy-linux-amd64.tar.gz` | 解压后 `./mimo-web-proxy` |
-
-            ## 首次运行
-
-            程序是自包含的：首次启动会在配置目录自动生成 `config.json` 与 `data/`，浏览器自动打开面板 `http://localhost:8080`。
-
-            - **Windows**：配置在 exe 同目录
-            - **macOS**：配置在 `~/Library/Application Support/mimo-web-proxy/`
-            - **Linux**：配置在二进制同目录
-
-            ### macOS 未签名提示
-
-            本版本未做代码签名/公证，首次打开会被 Gatekeeper 拦截。**右键点击 App → 打开 → 再点"打开"**，或执行：
-
-            ```bash
-            xattr -dr com.apple.quarantine "/Applications/MiMo Web Proxy.app"
-            ```
-
-            ### Linux
-
-            ```bash
-            tar -xzf mimo-web-proxy-linux-amd64.tar.gz
-            chmod +x mimo-web-proxy && ./mimo-web-proxy
-            ```
-
-            ## 配置客户端
-
-            | 客户端 | Base URL | API Key |
-            |---|---|---|
-            | OpenAI 兼容（Cherry Studio / ChatBox / Cline 等） | `http://localhost:8080/v1` | `sk-mimo` |
-            | Anthropic 兼容（Claude Code 等） | `http://localhost:8080` | `sk-mimo` |
-
-            完整说明见 [README](https://github.com/teddyli18000/mimo-web-proxy#readme)。
+            安装与使用见 [README](https://github.com/teddyli18000/mimo-web-proxy#readme)。
