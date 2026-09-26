@@ -18,7 +18,6 @@ import (
 	"github.com/teddyli18000/mimo-web-proxy/internal/convstore"
 	"github.com/teddyli18000/mimo-web-proxy/internal/mimo"
 	"github.com/teddyli18000/mimo-web-proxy/internal/pool"
-	"github.com/teddyli18000/mimo-web-proxy/internal/prompt"
 	"github.com/teddyli18000/mimo-web-proxy/internal/router"
 	"github.com/teddyli18000/mimo-web-proxy/internal/stats"
 	"github.com/teddyli18000/mimo-web-proxy/internal/toolcall"
@@ -530,7 +529,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 组装 (role, text) 序列供 fingerprint 与 serialize 共用
-	systemText := prompt.NormalizeContent(req.System)
+	systemText := adapter.NormalizeContent(req.System)
 	roleTexts := toRoleTextsAnthropic(req.Messages, systemText)
 
 	// 会话解析：fingerprint 前缀延续 → 复用；否则新建

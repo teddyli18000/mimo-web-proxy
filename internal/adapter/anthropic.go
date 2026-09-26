@@ -13,7 +13,7 @@ type AnthropicRequest struct {
 	Messages []AnthropicMessage `json:"messages"`
 	// System 允许字符串或 content block 数组：官方规范两种都合法，Claude Code
 	// 等客户端发的是数组（带 cache_control 标记），声明成 string 会直接反序列化
-	// 失败并返回 400。取文本时走 prompt.NormalizeContent 统一处理。
+	// 失败并返回 400。取文本时走 NormalizeContent 统一处理。
 	System      interface{}     `json:"system,omitempty"`
 	MaxTokens   int             `json:"max_tokens"`
 	Stream      bool            `json:"stream"`

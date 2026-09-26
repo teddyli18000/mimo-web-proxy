@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/teddyli18000/mimo-web-proxy/internal/adapter"
-	"github.com/teddyli18000/mimo-web-proxy/internal/prompt"
 )
 
 // =============================================================================
@@ -62,7 +61,7 @@ func openAIMessageText(m adapter.OpenAIMessage) string {
 	case "tool":
 		return renderToolResult(m.ToolCallID, m.Content)
 	default:
-		return prompt.NormalizeContent(m.Content)
+		return adapter.NormalizeContent(m.Content)
 	}
 }
 
@@ -71,16 +70,16 @@ func anthropicMessageText(m adapter.AnthropicMessage) string {
 	if m.Role == "assistant" {
 		return renderAnthropicAssistant(m)
 	}
-	return prompt.NormalizeContent(m.Content)
+	return adapter.NormalizeContent(m.Content)
 }
 
 // renderAnthropicAssistant 渲染 Anthropic 的 assistant 消息。
-// prompt.NormalizeContent 会跳过 tool_use 块，直接用它会让历史里的工具调用
+// adapter.NormalizeContent 会跳过 tool_use 块，直接用它会让历史里的工具调用
 // 退化成空的 "assistant: "，模型看不到自己上一轮调用了什么（多轮工具循环会断）。
 func renderAnthropicAssistant(m adapter.AnthropicMessage) string {
 	blocks, ok := m.Content.([]interface{})
 	if !ok {
-		return "assistant: " + strings.TrimSpace(prompt.NormalizeContent(m.Content))
+		return "assistant: " + strings.TrimSpace(adapter.NormalizeContent(m.Content))
 	}
 	var text string
 	var calls []string
@@ -125,12 +124,12 @@ func renderAssistant(m adapter.OpenAIMessage) string {
 		for _, tc := range m.ToolCalls {
 			b.WriteString(tc.Function.Name + "(" + tc.Function.Arguments + ")\n")
 		}
-		if s := prompt.NormalizeContent(m.Content); s != "" {
+		if s := adapter.NormalizeContent(m.Content); s != "" {
 			b.WriteString("\n" + s)
 		}
 		return strings.TrimSuffix(b.String(), "\n")
 	}
-	b.WriteString(" " + prompt.NormalizeContent(m.Content))
+	b.WriteString(" " + adapter.NormalizeContent(m.Content))
 	return strings.TrimSpace(b.String())
 }
 
@@ -140,7 +139,7 @@ func renderToolResult(toolCallID string, content interface{}) string {
 	if toolCallID != "" {
 		ref = " (" + toolCallID + ")"
 	}
-	return "[Tool Result]" + ref + ":\n" + prompt.NormalizeContent(content)
+	return "[Tool Result]" + ref + ":\n" + adapter.NormalizeContent(content)
 }
 
 // serializeMessages 全量重放组装 query（extraSystem: 额外注入 system 的文本如工具定义，纳入长度预算）
@@ -272,7 +271,7 @@ func currentTurnQuestionAnthropic(msgs []adapter.AnthropicMessage) string {
 func anthropicUserText(m adapter.AnthropicMessage) string {
 	blocks, ok := m.Content.([]interface{})
 	if !ok {
-		return prompt.NormalizeContent(m.Content)
+		return adapter.NormalizeContent(m.Content)
 	}
 	var parts []string
 	for _, b := range blocks {

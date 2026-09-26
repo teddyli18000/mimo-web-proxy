@@ -89,12 +89,6 @@ go build -o mimo-web-proxy .         # macOS / Linux
 GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mimo-web-proxy-mac .
 ```
 
-### Docker
-
-```bash
-docker compose up -d
-```
-
 ### 自动构建
 
 打 tag 即触发 [GitHub Actions](.github/workflows/release.yml)：三平台并行构建 → 发布 pre-release。
@@ -255,12 +249,18 @@ curl http://localhost:8080/v1/messages \
 ```bash
 cd test/sdk && npm install
 
+npm run all           # 依次跑下面 7 套（约 25 分钟）
+npm run edges         # 请求校验 / Unicode / 长输入截断 / 流式事件顺序 / 会话隔离
+npm run concurrency   # 并发与会话隔离
+npm run protocol      # 流式协议合规（id 一致、usage 块、finish_reason、tool_calls index）
+npm run images        # 图片端到端（三模型识图、缓存、Anthropic 图片块）
 npm run stability     # 三模型 × 多轮上下文 / 工具调用 / 长上下文 / 流式
 npm run anthropic     # Anthropic 格式：基础 / 多轮 / tool_use / 流式
-npm run long-session  # 12 轮长会话，验证末尾仍记得首轮内容
-npm run long-output   # 3000+ 字长输出完整性
-npm run tools         # 工具调用可靠性
+npm run config        # default_model、system 数组、多轮工具历史、管理接口
 ```
+
+其余套件（`tools`、`tool-precision`、`long-session`、`long-output`、`anthropic-tools`）见
+[`test/sdk/README.md`](test/sdk/README.md)。
 
 Go 单元测试：`go test ./...`
 
