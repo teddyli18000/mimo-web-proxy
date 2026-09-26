@@ -319,3 +319,27 @@ func TestParseNestedToolCalls(t *testing.T) {
 
 	t.Logf("nested format OK: name=%s input=%v", call.Name, call.Input)
 }
+
+// TestParseMismatchedWrapperCloseTag 模型偶尔把包装标签的闭合写错
+// （实测 <tool_calls> … </function_calls>），此时仍应解析出调用。
+func TestParseMismatchedWrapperCloseTag(t *testing.T) {
+	text := "<tool_calls>\n" +
+		"<invoke name=\"read_file\">\n" +
+		"<parameter name=\"path\">/etc/hostname</parameter>\n" +
+		"</invoke>\n" +
+		"</function_calls>"
+
+	if !HasToolCallSyntax(text) {
+		t.Fatal("HasToolCallSyntax 应识别为工具调用")
+	}
+	calls := ParseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("期望解析出 1 个调用，实际 %d 个", len(calls))
+	}
+	if calls[0].Name != "read_file" {
+		t.Errorf("name = %q, want read_file", calls[0].Name)
+	}
+	if got := calls[0].Input["path"]; got != "/etc/hostname" {
+		t.Errorf("path = %v, want /etc/hostname", got)
+	}
+}

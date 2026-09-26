@@ -6,7 +6,7 @@ const client = new Anthropic({ apiKey: 'sk-mimo', baseURL: BASE });
 
 const TOOLS = [
   { name: 'get_weather', description: 'Get current weather for a city.', input_schema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } },
-  { name: 'run_command', description: 'Run a shell command.', input_schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+  { name: 'read_file', description: 'Read a file.', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
 ];
 
 let pass = 0, fail = 0;
@@ -54,20 +54,21 @@ async function testTools(model) {
       model, max_tokens: 300,
       system: 'You are an agent. Use tools when needed.',
       tools: TOOLS,
-      messages: [{ role: 'user', content: '用 get_weather 工具查一下北京的天气' }],
+      messages: [{ role: 'user', content: '用 read_file 工具读一下 /etc/hostname，告诉我内容。' }],
     });
     const toolUses = r.content.filter(b => b.type === 'tool_use');
     const text = r.content.filter(b => b.type === 'text').map(b => b.text).join('');
     record(toolUses.length > 0, 'tool_use 块', toolUses.length ? JSON.stringify(toolUses.map(t => ({ n: t.name, i: t.input }))) : `直接回答: ${text.slice(0, 60)}`);
     if (toolUses.length > 0) {
       const messages = [
-        { role: 'user', content: '用 get_weather 工具查一下北京的天气' },
+        { role: 'user', content: '用 read_file 工具读一下 /etc/hostname，告诉我内容。' },
         { role: 'assistant', content: r.content },
-        { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUses[0].id, content: JSON.stringify({ city: '北京', temp: '21°C', condition: '多云' }) }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUses[0].id, content: 'file_path: /etc/hostname\n<content>\nbuild-runner-07\n</content>' }] },
       ];
       const r2 = await client.messages.create({ model, max_tokens: 200, system: 'You are an agent.', tools: TOOLS, messages });
       const t2 = r2.content.filter(b => b.type === 'text').map(b => b.text).join('');
-      record(t2.length > 0, '工具结果回传后作答', JSON.stringify(t2.slice(0, 60)));
+      // 断言结果确实流回来了：模型应复述工具返回的主机名
+      record(t2.includes('build-runner-07'), '工具结果回传后作答', JSON.stringify(t2.slice(0, 70)));
     }
   } catch (e) {
     record(false, '工具调用', e.message.slice(0, 100));

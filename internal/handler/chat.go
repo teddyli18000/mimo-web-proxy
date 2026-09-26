@@ -667,7 +667,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	finalText := strings.TrimSpace(result.Text)
 	if hasTools && toolcall.HasToolCallSyntax(finalText) {
 		calls := toolcall.ParseToolCallsFromText(finalText)
-		log.Printf("[tools] Anthropic: parsed %d calls from text", len(calls))
+		log.Printf("[tools] Anthropic: parsed %d calls (raw len=%d): %q",
+			len(calls), len(finalText), finalText[:min(len(finalText), 400)])
 		if len(calls) > 0 {
 			if req.Stream {
 				w.Header().Set("Content-Type", "text/event-stream")

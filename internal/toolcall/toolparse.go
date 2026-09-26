@@ -303,30 +303,36 @@ func parseDSML(text string) []ParsedToolCall {
 // ===== tool_calls XML parser (state machine) =====
 
 func parseToolCallsXML(text string) []ParsedToolCall {
-	wrappers := findBlocks(text, "tool_calls")
-	if len(wrappers) == 0 {
-		return nil
+	for _, w := range findBlocks(text, "tool_calls") {
+		if calls := parseInvokeBlocks(w.Body); len(calls) > 0 {
+			return calls
+		}
 	}
+	// 包装标签配不上时直接在整个文本里找 <invoke>：模型偶尔把闭合标签写错
+	// （实测见过 <tool_calls>…</function_calls>），严格配对会让整轮工具调用丢失。
+	return parseInvokeBlocks(text)
+}
+
+// parseInvokeBlocks 解析 body 里全部 <invoke name="…"><parameter …></invoke>
+func parseInvokeBlocks(body string) []ParsedToolCall {
 	var calls []ParsedToolCall
-	for _, w := range wrappers {
-		for _, inv := range findBlocks(w.Body, "invoke") {
-			attrs := parseAttrs(inv.Attrs)
-			name := strings.TrimSpace(html.UnescapeString(attrs["name"]))
-			if name == "" {
+	for _, inv := range findBlocks(body, "invoke") {
+		attrs := parseAttrs(inv.Attrs)
+		name := strings.TrimSpace(html.UnescapeString(attrs["name"]))
+		if name == "" {
+			continue
+		}
+		input := map[string]any{}
+		for _, pm := range findBlocks(inv.Body, "parameter") {
+			pAttrs := parseAttrs(pm.Attrs)
+			pName := strings.TrimSpace(html.UnescapeString(pAttrs["name"]))
+			if pName == "" {
 				continue
 			}
-			input := map[string]any{}
-			for _, pm := range findBlocks(inv.Body, "parameter") {
-				pAttrs := parseAttrs(pm.Attrs)
-				pName := strings.TrimSpace(html.UnescapeString(pAttrs["name"]))
-				if pName == "" {
-					continue
-				}
-				val := parseParamValue(pm.Body)
-				appendVal(input, pName, val)
-			}
-			calls = append(calls, ParsedToolCall{Name: name, Input: input})
+			val := parseParamValue(pm.Body)
+			appendVal(input, pName, val)
 		}
+		calls = append(calls, ParsedToolCall{Name: name, Input: input})
 	}
 	return calls
 }
