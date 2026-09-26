@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,27 @@ import (
 
 //go:embed static/*
 var staticFiles embed.FS
+
+// placeholderMarker 占位前端的特征串。
+// static/ 不入库（由 web/ 构建产物填充），本地编译时如果没有先构建前端，
+// 就会把这些占位文件嵌进二进制——面板看起来"能打开"但其实是空壳。
+// 这种情况必须在启动日志里喊出来，否则会被静默交付出去。
+const placeholderMarker = "dev placeholder"
+
+// warnIfPlaceholderFrontend 检测嵌入的是否为占位前端
+func warnIfPlaceholderFrontend(staticFS fs.FS) {
+	data, err := fs.ReadFile(staticFS, "index.html")
+	if err != nil {
+		log.Printf("⚠️  未嵌入前端页面（static/index.html 缺失），管理面板不可用。")
+		log.Printf("    构建前请先执行：cd web && npm install && npm run build")
+		return
+	}
+	if bytes.Contains(data, []byte(placeholderMarker)) {
+		log.Printf("⚠️  当前二进制嵌入的是【占位前端】，管理面板只会显示提示页。")
+		log.Printf("    这是本地编译未构建前端导致的；请先执行：cd web && npm install && npm run build")
+		log.Printf("    官方发布产物不受影响（CI 会先构建前端）。")
+	}
+}
 
 func main() {
 	baseDir := resolveBaseDir()
@@ -102,6 +124,7 @@ func main() {
 
 	// 前端 SPA
 	staticFS, _ := fs.Sub(staticFiles, "static")
+	warnIfPlaceholderFrontend(staticFS)
 	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "/" {
