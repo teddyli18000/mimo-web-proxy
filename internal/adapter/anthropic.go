@@ -72,26 +72,6 @@ type AnthropicStreamEvent struct {
 	Delta interface{} `json:"delta,omitempty"`
 }
 
-// AnthropicTextDelta 是文本增量
-type AnthropicTextDelta struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-
-func MakeAnthropicResponse(model, content string) []byte {
-	resp := AnthropicResponse{
-		ID:      fmt.Sprintf("msg_%s", uuid.New().String()[:24]),
-		Type:    "message",
-		Role:    "assistant",
-		Content: []AnthropicBlock{{Type: "text", Text: content}},
-		Model:   model,
-		StopReason: "end_turn",
-	}
-	data, _ := json.Marshal(resp)
-	return data
-}
-
 // MakeAnthropicResponseWithUsage 生成带 usage 的非流式响应
 func MakeAnthropicResponseWithUsage(model, content string, inTokens, outTokens int) []byte {
 	resp := AnthropicResponse{

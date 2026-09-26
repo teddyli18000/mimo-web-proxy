@@ -158,10 +158,6 @@ func MakeOpenAIStreamUsageChunk(id, model string, usage *OpenAIUsage) []byte {
 	return marshalChunk(id, model, []OpenAIChoice{}, usage)
 }
 
-// MakeOpenAIResponse 创建 OpenAI 非流式响应
-func MakeOpenAIResponse(model, content string) []byte {
-	return MakeOpenAIResponseWithUsage(model, content, nil)
-}
 
 // MakeOpenAIResponseWithUsage 创建带 usage 的非流式响应
 func MakeOpenAIResponseWithUsage(model, content string, usage *OpenAIUsage) []byte {
@@ -186,12 +182,6 @@ func MakeOpenAIResponseWithUsage(model, content string, usage *OpenAIUsage) []by
 	}
 	data, _ := json.Marshal(resp)
 	return data
-}
-
-// OpenAIModelsResponse 是 /v1/models 的响应
-type OpenAIModelsResponse struct {
-	Object string      `json:"object"`
-	Data   interface{} `json:"data"`
 }
 
 // MakeOpenAIToolCallResponse 创建 OpenAI 非流式工具调用响应

@@ -34,11 +34,6 @@ type convState struct {
 	UpdatedAt   int64  // unix seconds, 用于 LRU 淘汰
 }
 
-func New() *Store {
-	return &Store{
-		convs: make(map[string]*convState),
-	}
-}
 
 // NewPersisted 创建带 JSON 持久化的 Store（重启后会话不丢，MiMo 服务端上下文仍有效）
 func NewPersisted(path string) *Store {
@@ -244,15 +239,6 @@ func (s *Store) SetParentID(convID, parentID string) {	s.mu.Lock()
 	}
 }
 
-// ParentID 读取会话的最后 AI 消息 ID
-func (s *Store) ParentID(convID string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if cs, ok := s.convs[convID]; ok {
-		return cs.ParentID
-	}
-	return ""
-}
 
 // SetTask 记录会话当前的任务锚点（用户最近的提问）。
 // 工具结果轮只发工具输出，模型容易丢失任务上下文（2026-09 DSH 实测：
