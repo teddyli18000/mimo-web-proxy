@@ -317,6 +317,11 @@ func serializeRoleTexts(rts []roleText, maxChars int, extraSystem ...string) str
 	if queryMsg != nil {
 		queryStr = "[Current Query]\n" + formatRoleText(*queryMsg)
 	}
+	// 没有可发送的本轮内容（例如只给了 system）就返回空串，让调用方按
+	// "no valid user message" 拒绝——否则会把一段没有提问的 prompt 发给上游。
+	if queryStr == "" {
+		return ""
+	}
 
 	// 组装：system → 历史 → 上下文 → 提问（提问放最后，模型对末尾注意力最强）
 	parts := make([]string, 0, 4)
