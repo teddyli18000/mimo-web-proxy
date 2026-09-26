@@ -44,7 +44,6 @@ func main() {
 	dataDir := filepath.Join(baseDir, "data")
 	os.MkdirAll(dataDir, 0755)
 	stats.Init(filepath.Join(dataDir, "stats.json"))
-	stats.InitConvStore(filepath.Join(dataDir, "conversations.json"))
 
 	// 初始化账号池
 	accountPool := pool.New(cfg.Accounts)
@@ -63,7 +62,8 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	convStore := convstore.New()
+	// 会话映射落盘：重启后仍能复用上游会话（否则首轮要重发完整上下文）
+	convStore := convstore.NewPersisted(filepath.Join(dataDir, "conversations.json"))
 	chatHandler := handler.NewChatHandler(accountPool, convStore)
 	messagesHandler := handler.NewMessagesHandler(accountPool, convStore)
 	adminHandler := handler.NewAdminHandler(accountPool)

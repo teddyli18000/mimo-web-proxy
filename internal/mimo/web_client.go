@@ -185,23 +185,26 @@ func (c *WebClient) Chat(ctx context.Context, query, model, conversationID, pare
 		resp.Body.Close()
 
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		if retryable && attempt < maxRetries && time.Now().Before(deadline) {
+		if retryable && attempt < maxRetries {
 			// 2s, 4s, 8s, 16s, 16s（封顶 16s）；加 0~1s 抖动避免并发请求同步重试
 			secs := 1 << (attempt + 1)
 			if secs > 16 {
 				secs = 16
 			}
 			backoff := time.Duration(secs)*time.Second + time.Duration(rand.Int63n(1000))*time.Millisecond
-			if remaining := time.Until(deadline); backoff > remaining {
-				backoff = remaining
+			// 预算不足以完成一次完整退避就直接放弃：退避被裁到接近 0 等于无退避重发，
+			// 面对 429 必然再失败，还会把总耗时拖过预算。
+			if remaining := time.Until(deadline); backoff <= remaining {
+				log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff.Round(time.Millisecond))
+				select {
+				case <-ctx.Done():
+					return nil, fmt.Errorf("mimo %d: %s (cancelled during retry backoff)", resp.StatusCode, string(errBody))
+				case <-time.After(backoff):
+				}
+				continue
 			}
-			log.Printf("[retry] mimo %d (attempt %d/%d), backing off %v", resp.StatusCode, attempt+1, maxRetries, backoff.Round(time.Millisecond))
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("mimo %d: %s (cancelled during retry backoff)", resp.StatusCode, string(errBody))
-			case <-time.After(backoff):
-			}
-			continue
+			log.Printf("[retry] mimo %d: retry budget exhausted (%v left), giving up after %d attempts",
+				resp.StatusCode, time.Until(deadline).Round(time.Second), attempt+1)
 		}
 		return nil, fmt.Errorf("mimo returned %d: %s", resp.StatusCode, string(errBody))
 	}
