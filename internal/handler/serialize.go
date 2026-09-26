@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -67,7 +68,52 @@ func openAIMessageText(m adapter.OpenAIMessage) string {
 
 // anthropicMessageText 提取 Anthropic 消息的纯文本
 func anthropicMessageText(m adapter.AnthropicMessage) string {
+	if m.Role == "assistant" {
+		return renderAnthropicAssistant(m)
+	}
 	return prompt.NormalizeContent(m.Content)
+}
+
+// renderAnthropicAssistant 渲染 Anthropic 的 assistant 消息。
+// prompt.NormalizeContent 会跳过 tool_use 块，直接用它会让历史里的工具调用
+// 退化成空的 "assistant: "，模型看不到自己上一轮调用了什么（多轮工具循环会断）。
+func renderAnthropicAssistant(m adapter.AnthropicMessage) string {
+	blocks, ok := m.Content.([]interface{})
+	if !ok {
+		return "assistant: " + strings.TrimSpace(prompt.NormalizeContent(m.Content))
+	}
+	var text string
+	var calls []string
+	for _, b := range blocks {
+		bm, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch bm["type"] {
+		case "text":
+			if t, ok := bm["text"].(string); ok {
+				text += t
+			}
+		case "tool_use":
+			name, _ := bm["name"].(string)
+			args, _ := json.Marshal(bm["input"])
+			calls = append(calls, fmt.Sprintf("%s(%s)", name, string(args)))
+		}
+	}
+	var b strings.Builder
+	b.WriteString("assistant:")
+	if len(calls) > 0 {
+		b.WriteString(" [Tool Calls]\n")
+		for _, c := range calls {
+			b.WriteString(c + "\n")
+		}
+		if t := strings.TrimSpace(text); t != "" {
+			b.WriteString("\n" + t)
+		}
+		return strings.TrimSuffix(b.String(), "\n")
+	}
+	b.WriteString(" " + strings.TrimSpace(text))
+	return strings.TrimSpace(b.String())
 }
 
 // renderAssistant 渲染 assistant 消息（带 tool_calls 时显式标注调用与参数）
@@ -137,6 +183,19 @@ func looksLikeInjectedContext(s string) bool {
 		strings.HasPrefix(head, "Current DSH")
 }
 
+// isBareConfirmation 判断用户是否只是在应声（"继续"/"好的"/"ok"）。
+// 这类回复会覆盖任务锚点，让后续工具轮注入 "Current task: 继续" 而丢掉真任务。
+func isBareConfirmation(q string) bool {
+	t := strings.ToLower(strings.TrimSpace(q))
+	t = strings.TrimRight(t, "。！!.~～ ")
+	switch t {
+	case "继续", "接着", "往下", "好", "好的", "好嘞", "行", "可以", "嗯", "对", "是",
+		"ok", "okay", "yes", "y", "go", "go on", "continue", "next", "sure":
+		return true
+	}
+	return false
+}
+
 // DeltaMessages 返回本轮新增的消息（最后一个 assistant 消息之后的部分）。
 //
 // agent 客户端（DSH/Cline 等）每轮都会重发完整历史，而上游 MiMo 服务端已保有
@@ -200,11 +259,32 @@ func currentTurnQuestionAnthropic(msgs []adapter.AnthropicMessage) string {
 		if m.Role != "user" || isAnthropicToolResult(m) {
 			continue
 		}
-		if q := strings.TrimSpace(anthropicMessageText(m)); q != "" && !looksLikeInjectedContext(q) {
+		if q := strings.TrimSpace(anthropicUserText(m)); q != "" && !looksLikeInjectedContext(q) {
 			return q
 		}
 	}
 	return ""
+}
+
+// anthropicUserText 提取 user 消息中的文本块。
+// 混合消息（tool_result + text）里若整段交给 NormalizeContent，会把工具输出
+// 一起拼进来，导致任务锚点被命令输出污染。
+func anthropicUserText(m adapter.AnthropicMessage) string {
+	blocks, ok := m.Content.([]interface{})
+	if !ok {
+		return prompt.NormalizeContent(m.Content)
+	}
+	var parts []string
+	for _, b := range blocks {
+		bm, ok := b.(map[string]interface{})
+		if !ok || bm["type"] != "text" {
+			continue
+		}
+		if t, ok := bm["text"].(string); ok && t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // isAnthropicToolResult 判断该 user 消息是否只是工具结果回传（不含用户文本）

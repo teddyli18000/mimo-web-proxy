@@ -214,9 +214,28 @@ func countNonSystem(msgs [][2]string) int {
 	return n
 }
 
-// SetParentID 更新指定会话的最后 AI 消息 ID
-func (s *Store) SetParentID(convID, parentID string) {
+// Replace 把旧会话的映射迁到新的 conversationId 上。
+// 空响应重试会换一个全新的上游会话；不迁移的话新 ID 不在表里，
+// SetParentID 会落空，下一轮请求还会按指纹命中那个已判定失效的旧会话。
+func (s *Store) Replace(oldConvID, newConvID string) {
+	if oldConvID == "" || newConvID == "" || oldConvID == newConvID {
+		return
+	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	cs, ok := s.convs[oldConvID]
+	if !ok {
+		return
+	}
+	delete(s.convs, oldConvID)
+	cs.ConvID = newConvID
+	cs.ParentID = "0"
+	s.convs[newConvID] = cs
+	s.saveLocked()
+}
+
+// SetParentID 更新指定会话的最后 AI 消息 ID
+func (s *Store) SetParentID(convID, parentID string) {	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cs, ok := s.convs[convID]; ok {
 		cs.ParentID = parentID

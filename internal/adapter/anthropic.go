@@ -9,13 +9,16 @@ import (
 
 // AnthropicRequest 是 Anthropic Messages API 格式
 type AnthropicRequest struct {
-	Model       string              `json:"model"`
-	Messages    []AnthropicMessage  `json:"messages"`
-	System      string              `json:"system,omitempty"`
-	MaxTokens   int                 `json:"max_tokens"`
-	Stream      bool                `json:"stream"`
-	Temperature *float64            `json:"temperature,omitempty"`
-	Tools       []AnthropicTool     `json:"tools,omitempty"`
+	Model    string             `json:"model"`
+	Messages []AnthropicMessage `json:"messages"`
+	// System 允许字符串或 content block 数组：官方规范两种都合法，Claude Code
+	// 等客户端发的是数组（带 cache_control 标记），声明成 string 会直接反序列化
+	// 失败并返回 400。取文本时走 prompt.NormalizeContent 统一处理。
+	System      interface{}     `json:"system,omitempty"`
+	MaxTokens   int             `json:"max_tokens"`
+	Stream      bool            `json:"stream"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	Tools       []AnthropicTool `json:"tools,omitempty"`
 }
 
 // AnthropicTool 是 Anthropic 格式的工具定义

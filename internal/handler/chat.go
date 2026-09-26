@@ -14,9 +14,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/teddyli18000/mimo-web-proxy/internal/adapter"
+	"github.com/teddyli18000/mimo-web-proxy/internal/config"
 	"github.com/teddyli18000/mimo-web-proxy/internal/convstore"
 	"github.com/teddyli18000/mimo-web-proxy/internal/mimo"
 	"github.com/teddyli18000/mimo-web-proxy/internal/pool"
+	"github.com/teddyli18000/mimo-web-proxy/internal/prompt"
 	"github.com/teddyli18000/mimo-web-proxy/internal/router"
 	"github.com/teddyli18000/mimo-web-proxy/internal/stats"
 	"github.com/teddyli18000/mimo-web-proxy/internal/toolcall"
@@ -60,6 +62,10 @@ type dialogIdData struct {
 	Content string `json:"content"`
 }
 
+// sseIdleTimeout 上游 SSE 读流空闲上限：超过这个时间没有任何事件就判定卡死。
+// 取值远大于正常出字间隔（首字通常数秒内到达），只用于兜住真正的挂起。
+const sseIdleTimeout = 180 * time.Second
+
 // webResult 收集上游 MiMo 网页端 SSE 流的完整结果
 type webResult struct {
 	Text        string     // 过滤 think 与 \u0000 后的全部正文
@@ -87,6 +93,10 @@ func collectWebResult(ctx context.Context, client *mimo.WebClient, query, model,
 }
 
 func collectWebResultFromReader(ctx context.Context, reader io.ReadCloser) (webResult, error) {
+	// 可取消：读流空闲超时需要主动中断底层的 SSE 解析
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	events := make(chan mimo.WebSSEEvent, 64)
 	errChan := make(chan error, 1)
 	go func() {
@@ -102,38 +112,56 @@ func collectWebResultFromReader(ctx context.Context, reader io.ReadCloser) (webR
 		upstreamErr string
 	)
 
-	for ev := range events {
-		switch ev.Event {
-		case "message":
-			if ev.ID != "" {
-				lastMsgID = ev.ID
+	// 读流空闲超时：上游可能建连后长时间不吐数据，没有这个上界时整个请求会一直
+	// 挂到客户端自己的超时（实测出现过 pi-ai "stream idle timeout after 300000ms"）。
+	idle := time.NewTimer(sseIdleTimeout)
+	defer idle.Stop()
+
+collect:
+	for {
+		select {
+		case <-idle.C:
+			cancel()
+			return webResult{}, fmt.Errorf("upstream stalled: no SSE event for %v", sseIdleTimeout)
+		case <-ctx.Done():
+			return webResult{}, ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				break collect
 			}
-			var msg struct {
-				Type    string `json:"type"`
-				Content string `json:"content"`
-			}
-			if err := json.Unmarshal([]byte(ev.Data), &msg); err != nil {
-				continue
-			}
-			if msg.Type == "text" && msg.Content != "" {
-				c := strings.ReplaceAll(msg.Content, "\u0000", "")
-				c, inThinking = filterThinkingChunk(c, inThinking)
-				if c != "" {
-					content.WriteString(c)
+			idle.Reset(sseIdleTimeout)
+			switch ev.Event {
+			case "message":
+				if ev.ID != "" {
+					lastMsgID = ev.ID
 				}
-			}
-		case "error":
-			var e struct {
-				Type    string `json:"type"`
-				Content string `json:"content"`
-			}
-			if err := json.Unmarshal([]byte(ev.Data), &e); err == nil && e.Content != "" {
-				upstreamErr = e.Content
-			}
-		case "usage":
-			var u usageData
-			if err := json.Unmarshal([]byte(ev.Data), &u); err == nil {
-				lastUsage = &u // 覆盖：以最后一个 usage 为准（fastchat 多 usage 事件规避）
+				var msg struct {
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &msg); err != nil {
+					continue
+				}
+				if msg.Type == "text" && msg.Content != "" {
+					c := strings.ReplaceAll(msg.Content, "\u0000", "")
+					c, inThinking = filterThinkingChunk(c, inThinking)
+					if c != "" {
+						content.WriteString(c)
+					}
+				}
+			case "error":
+				var e struct {
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &e); err == nil && e.Content != "" {
+					upstreamErr = e.Content
+				}
+			case "usage":
+				var u usageData
+				if err := json.Unmarshal([]byte(ev.Data), &u); err == nil {
+					lastUsage = &u // 覆盖：以最后一个 usage 为准（fastchat 多 usage 事件规避）
+				}
 			}
 		}
 	}
@@ -157,7 +185,7 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routeResult := router.RouteModel(req.Model, toMiMoMessages(req.Messages))
+	routeResult := router.RouteModel(req.Model, toMiMoMessages(req.Messages), config.Get().DefaultModel)
 	log.Printf("[route] model=%s reason=%s", routeResult.Model, routeResult.Reason)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
@@ -204,8 +232,8 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	// 丢失任务（2026-09 DSH 实测，模型自述"只收到工具输出、没有原始指令"）。
 	budget := router.MaxQueryCharsForModel(model)
 	turnQuestion := currentTurnQuestion(req.Messages)
-	if turnQuestion != "" {
-		h.convStore.SetTask(convID, turnQuestion)
+	// 只是应声（"继续"/"好的"）时不覆盖锚点，否则后续工具轮会注入无意义的任务
+	if turnQuestion != "" && !(isBareConfirmation(turnQuestion) && h.convStore.Task(convID) != "") {
 	}
 	taskAnchor := h.convStore.Task(convID)
 	// 工具结果轮（本轮没有新提问）需要把任务锚点带回去
@@ -251,6 +279,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 
 	curConvID := convID
 	curParentID := parentID
+	replacedFrom := "" // 非空表示空响应重试换过会话，成功后需迁移映射
 	var result webResult
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -262,9 +291,10 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 			return
 		}
 
-		// 上游明确业务错误（如文本超长）且无有效正文 → 不重试直接报错
-		if result.UpstreamErr != "" && result.Text == "" {
-			log.Printf("[error] mimo upstream error: %s", result.UpstreamErr)
+		// 上游业务错误（文本超长/风控等）一律报错，即使已经吐了部分正文：
+		// 把截断内容当成功返回，agent 客户端会据此继续往下走。
+		if result.UpstreamErr != "" {
+			log.Printf("[error] mimo upstream error (partial len=%d): %s", len(result.Text), result.UpstreamErr)
 			writeError(w, http.StatusBadGateway, "mimo: "+result.UpstreamErr)
 			return
 		}
@@ -274,6 +304,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		if isWebResultEmpty(result) {
 			if attempt == 0 {
 				log.Printf("[retry] empty response on convID=%s, retrying with full context", curConvID[:min(len(curConvID), 8)])
+				replacedFrom = curConvID
 				curConvID = randomHex32()
 				curParentID = "0"
 				query = buildQuery(true)
@@ -285,6 +316,13 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 		}
 
 		break
+	}
+
+	// 重试换过会话且最终成功：把会话映射迁到新 convID。
+	// 不迁移的话 SetParentID 会落空（新 ID 不在表里），且下一轮请求仍按指纹
+	// 命中那个已被判定失效的旧会话，上下文连续性直接断掉。
+	if replacedFrom != "" {
+		h.convStore.Replace(replacedFrom, curConvID)
 	}
 
 	// 记录 usage
@@ -483,7 +521,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routeResult := router.RouteModel(req.Model, nil)
+	routeResult := router.RouteModel(req.Model, nil, config.Get().DefaultModel)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
@@ -500,7 +538,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 组装 (role, text) 序列供 fingerprint 与 serialize 共用
-	roleTexts := toRoleTextsAnthropic(req.Messages, req.System)
+	systemText := prompt.NormalizeContent(req.System)
+	roleTexts := toRoleTextsAnthropic(req.Messages, systemText)
 
 	// 会话解析：fingerprint 前缀延续 → 复用；否则新建
 	convID, parentID, isNew := h.convStore.Resolve(roleTexts)
@@ -515,8 +554,8 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	hasTools := len(req.Tools) > 0
 	budgetA := router.MaxQueryCharsForModel(routeResult.Model)
 	turnQuestionA := currentTurnQuestionAnthropic(req.Messages)
-	if turnQuestionA != "" {
-		h.convStore.SetTask(convID, turnQuestionA)
+	// 只是应声（"继续"/"好的"）时不覆盖锚点，否则后续工具轮会注入无意义的任务
+	if turnQuestionA != "" && !(isBareConfirmation(turnQuestionA) && h.convStore.Task(convID) != "") {
 	}
 	taskAnchorA := h.convStore.Task(convID)
 	useAnchorA := !isNew && turnQuestionA == "" && taskAnchorA != ""
@@ -538,7 +577,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		if !full && useAnchorA {
 			extra = append(extra, "Current task (the user's request you are working on): "+taskAnchorA)
 		}
-		return serializeMessagesAnthropic(msgs, req.System, budgetA, extra...)
+		return serializeMessagesAnthropic(msgs, systemText, budgetA, extra...)
 	}
 	query := buildQueryA(isNew)
 	if query == "" {
@@ -561,6 +600,7 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	curConvID := convID
 	curParentID := parentID
+	replacedFrom := "" // 非空表示空响应重试换过会话，成功后需迁移映射
 	var result webResult
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -572,19 +612,21 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 上游明确业务错误（如文本超长）且无有效正文 → 不重试直接报错
-		if result.UpstreamErr != "" && result.Text == "" {
-			log.Printf("[error] Anthropic mimo upstream error: %s", result.UpstreamErr)
-			writeAnthropicError(w, http.StatusBadGateway, "mimo: " + result.UpstreamErr)
+		// 上游业务错误一律报错，即使已有部分正文（同 OpenAI 路径）
+		if result.UpstreamErr != "" {
+			log.Printf("[error] Anthropic mimo upstream error (partial len=%d): %s", len(result.Text), result.UpstreamErr)
+			writeAnthropicError(w, http.StatusBadGateway, "mimo: "+result.UpstreamErr)
 			return
 		}
 
 		// 空响应重试：首次尝试若为空且无明确错误，换全新 conversationId 重试一次
 		if isWebResultEmpty(result) {
 			if attempt == 0 {
-				log.Printf("[retry] Anthropic empty response on convID=%s, retrying with new convID...", curConvID[:min(len(curConvID), 8)])
+				log.Printf("[retry] Anthropic empty response on convID=%s, retrying with full context", curConvID[:min(len(curConvID), 8)])
+				replacedFrom = curConvID
 				curConvID = randomHex32()
 				curParentID = "0"
+				query = buildQueryA(true) // 与 OpenAI 路径一致：新会话必须带完整上下文
 				continue
 			}
 			log.Printf("[error] Anthropic mimo returned an empty response after retry")
@@ -593,6 +635,10 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		break
+	}
+
+	if replacedFrom != "" {
+		h.convStore.Replace(replacedFrom, curConvID)
 	}
 
 	// 记录 usage
@@ -665,10 +711,19 @@ func (h *MessagesHandler) Handle(w http.ResponseWriter, r *http.Request) {
 							"type":  "tool_use",
 							"id":    block.ID,
 							"name":  block.Name,
-							"input": block.Input,
+							"input": map[string]interface{}{},
 						},
 					}
 					fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_start", toolStart))
+					// 参数按规范走 input_json_delta 增量下发：只在 start 里塞完整
+					// input 时，按增量解析的客户端会拿到空参数。
+					if raw, err := json.Marshal(block.Input); err == nil {
+						fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_delta", map[string]interface{}{
+							"type":  "content_block_delta",
+							"index": blockIdx,
+							"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": string(raw)},
+						}))
+					}
 					fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIdx}))
 				}
 				fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", adapter.MakeAnthropicStreamEvent("message_delta", map[string]interface{}{

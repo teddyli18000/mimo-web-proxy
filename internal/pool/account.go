@@ -82,14 +82,29 @@ func (p *Pool) Count() int {
 	return len(p.clients)
 }
 
+// HealthCheck 逐个校验账号可用性。
+// 校验是网络请求（可达数十秒），必须在锁外做：持写锁会让所有聊天请求的
+// Next() 一起卡住（2026-09 审查发现）。
 func (p *Pool) HealthCheck(ctx context.Context) map[string]bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	results := make(map[string]bool)
+	p.mu.RLock()
+	snapshot := make([]*entry, 0, len(p.clients))
 	for _, e := range p.clients {
-		err := e.client.Validate(ctx)
-		e.healthy = err == nil
-		results[e.account.ID] = e.healthy
+		snapshot = append(snapshot, e)
 	}
+	p.mu.RUnlock()
+
+	results := make(map[string]bool, len(snapshot))
+	for _, e := range snapshot {
+		healthy := e.client.Validate(ctx) == nil
+		results[e.account.ID] = healthy
+	}
+
+	p.mu.Lock()
+	for _, e := range snapshot {
+		if h, ok := results[e.account.ID]; ok {
+			e.healthy = h
+		}
+	}
+	p.mu.Unlock()
 	return results
 }

@@ -31,8 +31,10 @@ type RouteResult struct {
 // RouteModel 根据消息内容决定使用哪个模型
 // 规则：
 // 1. 用户显式指定模型 → 尊重
-// 2. 未指定（空/auto）→ 含多模态内容用 v2.6-flash，纯文本用 v2.6-pro
-func RouteModel(requestedModel string, messages []mimo.Message) RouteResult {
+// 2. 未指定（空/auto）→ 含多模态内容用 v2.6-flash，纯文本用配置的 default_model
+//
+// fallback 来自 config.json 的 default_model（管理面板可改）；传空串时退回常量。
+func RouteModel(requestedModel string, messages []mimo.Message, fallback string) RouteResult {
 	if requestedModel != "" && requestedModel != "auto" {
 		normalized := normalizeModel(requestedModel)
 		return RouteResult{Model: normalized, Reason: "explicit"}
@@ -44,6 +46,11 @@ func RouteModel(requestedModel string, messages []mimo.Message) RouteResult {
 		}
 	}
 
+	if fallback != "" {
+		if normalized := normalizeModel(fallback); normalized != "" {
+			return RouteResult{Model: normalized, Reason: "configured_default"}
+		}
+	}
 	return RouteResult{Model: DefaultModel, Reason: "text_only"}
 }
 
