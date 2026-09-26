@@ -16,7 +16,10 @@
     "tool-precision": "node tool-precision.mjs",
     "long-session": "node long-session.mjs",
     "long-output": "node long-output.mjs",
-    "all": "npm run edges && npm run concurrency && npm run protocol && npm run images && npm run stability && npm run anthropic && npm run config"
+    "all": "npm run edges && npm run concurrency && npm run protocol && npm run images && npm run stability && npm run anthropic && npm run config",
+    "image-multiturn": "node image-multiturn.mjs",
+    "image-large": "node image-large.mjs",
+    "tool-call-text": "node tool-call-text.mjs"
   },
   "dependencies": {
     "openai": "^6.40.0",

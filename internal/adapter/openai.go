@@ -135,7 +135,8 @@ func MakeOpenAIStreamFinishChunk(id, model string) []byte {
 // MakeOpenAIStreamToolCallChunk 工具调用块（finish_reason=tool_calls）。
 // 每个调用带 index：OpenAI 规范要求流式工具调用分片用 index 归组，
 // 缺了它客户端无法把分片拼回完整调用。
-func MakeOpenAIStreamToolCallChunk(id, model string, toolCalls []OpenAIToolCall) []byte {
+// content 带上调用前的说明文字（与 tool_calls 并存是规范允许的）。
+func MakeOpenAIStreamToolCallChunk(id, model, content string, toolCalls []OpenAIToolCall) []byte {
 	indexed := make([]OpenAIToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
 		idx := i
@@ -144,7 +145,7 @@ func MakeOpenAIStreamToolCallChunk(id, model string, toolCalls []OpenAIToolCall)
 	}
 	fr := "tool_calls"
 	return marshalChunk(id, model, []OpenAIChoice{
-		{Index: 0, Delta: &OpenAIDelta{ToolCalls: indexed}, FinishReason: &fr},
+		{Index: 0, Delta: &OpenAIDelta{Content: content, ToolCalls: indexed}, FinishReason: &fr},
 	}, nil)
 }
 
@@ -184,8 +185,10 @@ func MakeOpenAIResponseWithUsage(model, content string, usage *OpenAIUsage) []by
 	return data
 }
 
-// MakeOpenAIToolCallResponse 创建 OpenAI 非流式工具调用响应
-func MakeOpenAIToolCallResponse(model string, toolCalls []OpenAIToolCall) []byte {
+// MakeOpenAIToolCallResponse 创建 OpenAI 非流式工具调用响应。
+// content 带上模型在调用工具前的说明文字（OpenAI 规范允许 content 与 tool_calls 并存），
+// 此前固定为空串会把模型"我准备读一下文件"这类交代整段丢掉。
+func MakeOpenAIToolCallResponse(model, content string, toolCalls []OpenAIToolCall) []byte {
 	now := time.Now().Unix()
 	fr := "tool_calls"
 	resp := OpenAIChatResponse{
@@ -198,7 +201,7 @@ func MakeOpenAIToolCallResponse(model string, toolCalls []OpenAIToolCall) []byte
 				Index: 0,
 				Message: &OpenAIMessage{
 					Role:      "assistant",
-					Content:   "",
+					Content:   content,
 					ToolCalls: toolCalls,
 				},
 				FinishReason: &fr,

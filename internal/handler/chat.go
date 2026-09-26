@@ -370,7 +370,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				streamID := adapter.NewStreamID()
-				fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamToolCallChunk(streamID, model, toolCalls))
+				fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamToolCallChunk(streamID, model, toolcall.StripToolCallSyntax(finalText), toolCalls))
 				if openaiUsage != nil {
 					fmt.Fprintf(w, "data: %s\n\n", adapter.MakeOpenAIStreamUsageChunk(streamID, model, openaiUsage))
 				}
@@ -380,7 +380,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 				}
 				return
 			} else {
-				respBody := adapter.MakeOpenAIToolCallResponse(model, toolCalls)
+				respBody := adapter.MakeOpenAIToolCallResponse(model, toolcall.StripToolCallSyntax(finalText), toolCalls)
 				if openaiUsage != nil {
 					var m map[string]interface{}
 					if json.Unmarshal(respBody, &m) == nil {
